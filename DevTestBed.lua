@@ -5,6 +5,7 @@ DevTestBed.version = "1.0.0"
 
 local DEFAULT_SAVED_VARIABLES = {
     debug = false,
+    items = {},
 }
 
 function DevTestBed.Dbg(message)
@@ -268,36 +269,217 @@ function DevTestBed.CanEditHouse()
 end
 
 
-function DevTestBed.HandleSlashCommand(args)
-    args = string.lower(args or "")
 
-    if args == "" or args == "help" then
+
+
+
+
+
+
+--[[
+    DevTestBed.AddSelectedFurniture
+
+    Assigns the currently selected housing furnishing to a named entry
+    and stores its identifying information and current state.
+
+    This function performs the following steps:
+        1. Validates and normalizes the provided name
+        2. Confirms the player is inside a house
+        3. Confirms the player has housing edit permissions
+        4. Retrieves the currently selected furnishing from the housing editor
+        5. Validates the furnishing is a 2-state interactable object
+        6. Reads the current state (0-based index)
+        7. Retrieves furnishing identity data (name and furnitureDataId)
+        8. Attempts to resolve a human-readable state name
+        9. Ensures uniqueness of furnitureDataId across all saved entries
+        10. Saves or replaces the entry in SavedVariables
+
+    Parameters:
+        name (string)
+            A user-defined label used to identify the entry (e.g., team name)
+
+    Returns:
+        nil (results are stored in SavedVariables and confirmed via chat output)
+
+    Behavior:
+        - Requires the player to be inside a house
+        - Requires housing edit permissions
+        - Requires a furnishing to be selected in the housing editor
+        - Only accepts interactable furnishings with exactly two states
+        - Removes any existing entry using the same furnitureDataId
+        - Overwrites existing entries using the same name (case-insensitive)
+
+    Data Stored:
+        name              : User-defined label for the entry
+        itemName          : Display name of the furnishing
+        furnitureDataId   : Shared identifier for all copies of this furnishing type
+        state             : Current state index (0-based)
+        stateName         : Human-readable state label (if available)
+
+    Notes:
+        - furnitureId is instance-specific and used only to read state
+        - furnitureDataId is type-specific and used for long-term tracking
+        - State indices are 0-based (typically 0 = OFF, 1 = ON)
+        - Display state names may require a 1-based index (state + 1)
+        - Not all ESO API versions expose state display names
+        - Fallback labeling ("State X") is used when display names are unavailable
+
+    Example:
+        /dtb add TeamAlpha
+
+        -- With a valid item selected, this will:
+        -- 1. Capture its current ON/OFF state
+        -- 2. Store the furnishing type (furnitureDataId)
+        -- 3. Associate it with "TeamAlpha"
+]]
+function DevTestBed.AddSelectedFurniture(name)
+
+    -- Normalize and trim the provided name
+    name = tostring(name or ""):match("^%s*(.-)%s*$")
+
+    -- Validate name input
+    if name == "" then
+        DevTestBed.Print("Use: /dtb add <name>")
+        return
+    end
+
+    -- Ensure player is inside a house
+    if not DevTestBed.IsInHouse(true) then return end
+
+    -- Ensure player has permission to edit the house
+    if not HasAnyEditingPermissionsForCurrentHouse() then
+        DevTestBed.Print("You must have housing editor permissions to use this command.")
+        return
+    end
+
+    -- Get the currently selected furnishing from the housing editor
+    local furnitureId = HousingEditorGetSelectedFurnitureId()
+    if not furnitureId then
+        DevTestBed.Print("Open the housing editor and select an item first.")
+        return
+    end
+
+    -- Ensure the selected object is a 2-state interactable (e.g., ON/OFF)
+    local numStates = GetPlacedHousingFurnitureNumObjectStates(furnitureId)
+    if not numStates or numStates ~= 2 then
+        DevTestBed.Print("This command works only with interactable objects that have exactly two states.")
+        return
+    end
+
+    -- Get the current state index of the selected furnishing
+    -- NOTE: This is 0-based (typically 0 = OFF, 1 = ON)
+    local currentState = GetPlacedHousingFurnitureCurrentObjectStateIndex(furnitureId)
+    if currentState == nil then
+        DevTestBed.Print("Could not read the selected item's current state.")
+        return
+    end
+
+    -- Retrieve identifying information for the furnishing
+    -- furnitureDataId is shared across all items of this type
+    local itemName, _, furnitureDataId = GetPlacedHousingFurnitureInfo(furnitureId)
+    if not furnitureDataId then
+        DevTestBed.Print("Could not read the selected item's furnitureDataId.")
+        return
+    end
+
+    -- Determine a readable state name
+    -- ESO uses 0-based indexing for state, but display APIs are often 1-based
+    local stateName = "Unknown"
+
+    if type(GetPlacedFurniturePreviewVariationDisplayName) == "function" then
+        -- Convert 0-based state to 1-based index for display lookup
+        local displayIndex = currentState + 1
+
+        -- Attempt to retrieve a readable state name from the API
+        -- NOTE: Uses furnitureDataId (type-level), not furnitureId (instance-level)
+        stateName = GetPlacedFurniturePreviewVariationDisplayName(furnitureDataId, displayIndex)
+            or ("State " .. tostring(currentState))
+
+        -- Debug output for verification
+        DevTestBed.Print("furnitureDataId: " .. tostring(furnitureDataId))
+        DevTestBed.Print("currentState: " .. tostring(currentState))
+        DevTestBed.Print("displayIndex: " .. tostring(displayIndex))
+        DevTestBed.Print("stateName: " .. tostring(stateName))
+    else
+        -- Fallback if API function is unavailable
+        stateName = "State " .. tostring(currentState)
+    end
+
+    -- Ensure saved variables table exists
+    DevTestBed.savedVars.items = DevTestBed.savedVars.items or {}
+
+    -- Normalize key for storage (case-insensitive)
+    local newKey = string.lower(name)
+
+    -- Enforce uniqueness:
+    -- If another entry already uses this furnitureDataId, remove it
+    for existingKey, entry in pairs(DevTestBed.savedVars.items) do
+        if existingKey ~= newKey and tonumber(entry.furnitureDataId) == tonumber(furnitureDataId) then
+            DevTestBed.savedVars.items[existingKey] = nil
+            DevTestBed.Print("Removed duplicate assignment from: " .. tostring(entry.name or existingKey))
+        end
+    end
+
+    -- Save or overwrite the entry for this team/name
+    DevTestBed.savedVars.items[newKey] = {
+        name = name,                         -- User-defined label
+        itemName = itemName,                 -- ESO display name
+        furnitureDataId = furnitureDataId,   -- Type identifier (used for matching all instances)
+        state = currentState,                -- Actual state value (0-based)
+        stateName = stateName,               -- Human-readable state label
+    }
+
+    -- Confirmation output to chat
+    DevTestBed.Print(zo_strformat(
+        "Saved |c00FF00<<1>>|r as |c00FF00<<2>>|r - State |c00FF00<<3>>",
+        tostring(name),
+        tostring(itemName),
+        tostring(stateName)
+    ))
+end
+
+
+
+
+
+
+
+function DevTestBed.HandleSlashCommand(args)
+    local cmd, rest = string.match(args or "", "^%s*(%S*)%s*(.-)%s*$")
+    cmd = string.lower(cmd or "")
+
+    if cmd == "" or cmd == "help" then
         DevTestBed.ShowHelp()
         return
     end
 
-    if args == "ping" then
+    if cmd == "ping" then
         DevTestBed.Print("Loaded and ready.")
         return
     end
 
-    if args == "count" then
+    if cmd == "count" then
         DevTestBed.HouseFurnishingCount()
         return
     end
 
-   if args == "list" then
+    if cmd == "list" then
         DevTestBed.ListHouseItems()
         return
-   end
+    end
 
-    if args == "debug" then
+    if cmd == "add" then
+        DevTestBed.AddSelectedFurniture(rest)
+        return
+    end
+
+    if cmd == "debug" then
         DevTestBed.savedVars.debug = not DevTestBed.savedVars.debug
         DevTestBed.Print("Debug is now " .. (DevTestBed.savedVars.debug and "ON" or "OFF") .. ".")
         return
     end
 
-    DevTestBed.Print("Unknown command: " .. args)
+    DevTestBed.Print("Unknown command: " .. tostring(cmd))
     DevTestBed.ShowHelp()
 end
 
