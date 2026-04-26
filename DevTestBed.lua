@@ -18,11 +18,13 @@ function DevTestBed.Print(message)
 end
 
 function DevTestBed.ShowHelp()
-    DevTestBed.Print("Commands:")
-    DevTestBed.Print("/devtestbed - Show this help")
+   DevTestBed.Print("|cFFFF00Commands:|r")
+    DevTestBed.Print("/devtestbed or /dtb - Show this help")
     DevTestBed.Print("/dtb - Show this help")
     DevTestBed.Print("/dtb debug - Toggle debug output")
-    DevTestBed.Print("/dtb ping - Confirm the add-on is loaded")
+    DevTestBed.Print("/dtb ping  - Confirm the add-on is loaded")
+    DevTestBed.Print("/dtb count - Count all placed furnishings in the current house")
+    DevTestBed.Print("/dtb list  - List placed furnishings with furnitureId and furnitureDataId")
 end
 
 
@@ -208,8 +210,8 @@ function DevTestBed.ListHouseItems()
         local name, _, furnitureDataId = GetPlacedHousingFurnitureInfo(furnitureId)
 
         -- Output furnishing details to chat
-        DevTestBed.Print(string.format(
-            "%s | furnitureID (unique): %s | furnitureDataId (shared): %s",
+        DevTestBed.Print(zo_strformat(
+            "name: |c00FF00<<1>>|r - furnitureID (unique): |c00FF00<<2>>|r - furnitureDataId (shared): |c00FF00<<3>>|r",
             tostring(name),
             tostring(furnitureId),
             tostring(furnitureDataId)
