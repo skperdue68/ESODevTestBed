@@ -18,9 +18,8 @@ function DevTestBed.Print(message)
 end
 
 function DevTestBed.ShowHelp()
-   DevTestBed.Print("|cFFFF00Commands:|r")
+    DevTestBed.Print("|cFFFF00Commands:|r")
     DevTestBed.Print("/devtestbed or /dtb - Show this help")
-    DevTestBed.Print("/dtb - Show this help")
     DevTestBed.Print("/dtb debug - Toggle debug output")
     DevTestBed.Print("/dtb ping  - Confirm the add-on is loaded")
     DevTestBed.Print("/dtb count - Count all placed furnishings in the current house")
@@ -211,7 +210,7 @@ function DevTestBed.ListHouseItems()
 
         -- Output furnishing details to chat
         DevTestBed.Print(zo_strformat(
-            "name: |c00FF00<<1>>|r - furnitureID (unique): |c00FF00<<2>>|r - furnitureDataId (shared): |c00FF00<<3>>|r",
+            "name: |c00FF00<<1>>|r - furnitureId (unique): |c00FF00<<2>>|r - furnitureDataId (shared): |c00FF00<<3>>|r",
             tostring(name),
             tostring(furnitureId),
             tostring(furnitureDataId)
@@ -260,7 +259,7 @@ end
 ]]
 function DevTestBed.CanEditHouse()
     -- First ensure we are inside a house
-    if not DevTestBed.IsInHouse(true) then
+    if not DevTestBed.IsInHouse(false) then
         return false
     end
 
