@@ -6,6 +6,7 @@ DevTestBed.version = "1.0.0"
 local DEFAULT_SAVED_VARIABLES = {
     debug = false,
     items = {},
+    warTeams = {},
 }
 
 function DevTestBed.Dbg(message)
@@ -26,11 +27,16 @@ function DevTestBed.ShowHelp()
     DevTestBed.Print("/dtb count - Count all placed furnishings in the current house")
     DevTestBed.Print("/dtb list  - List placed furnishings with furnitureId and furnitureDataId")
     DevTestBed.Print("/dtb teams - List created teams and assigned items / state")
+    DevTestBed.Print("/dtb war teams - List War teams")
     DevTestBed.Print("/dtb add <name> - Creates a team with the selected Item in its current state")
+    DevTestBed.Print("/dtb war add <name> - Creates a War team with the selected item/current state")
     DevTestBed.Print("/dtb delete <name> - Delete a team")
     DevTestBed.Print("/dtb deleteall - Delete all teams")
+    DevTestBed.Print("/dtb war delete <name> - Delete a War team")
+    DevTestBed.Print("/dtb war deleteall - Delete all War teams")
     DevTestBed.Print("/dtb start threshold <count> [minutes] - Start threshold mode. Optional minutes must be 1-60 and enables timed/overtime scoring")
     DevTestBed.Print("/dtb start target <count> [minutes] - Start target mode. Randomly chooses count monitored items per team; optional minutes works like threshold")
+    DevTestBed.Print("/dtb start war [minutes] - Start War mode. All matching items count; optional minutes works like threshold")
     DevTestBed.Print("/dtb reset - Stop the active game and set all team items to their non-winning state")
     DevTestBed.Print("/dtb window - Toggle the game status window")
     DevTestBed.Print("/dtb controls - Toggle the game control panel")
@@ -383,6 +389,40 @@ end
         -- 2. Store the furnishing type (furnitureDataId)
         -- 3. Associate it with "TeamAlpha"
 ]]
+
+function DevTestBed.GetStateDisplayName(furnitureId, stateIndex)
+    stateIndex = tonumber(stateIndex)
+
+    if stateIndex == nil then
+        return "Unknown"
+    end
+
+    if type(GetPlacedFurniturePreviewVariationDisplayName) == "function" then
+        local displayIndex = stateIndex + 1
+        local stateName = GetPlacedFurniturePreviewVariationDisplayName(furnitureId, displayIndex)
+
+        if stateName and stateName ~= "" then
+            return stateName
+        end
+    end
+
+    return "State " .. tostring(stateIndex)
+end
+
+function DevTestBed.GetWarTeamTable()
+    DevTestBed.savedVars = DevTestBed.savedVars or {}
+    DevTestBed.savedVars.warTeams = DevTestBed.savedVars.warTeams or {}
+    return DevTestBed.savedVars.warTeams
+end
+
+function DevTestBed.GetActiveGameTeamTable()
+    if DevTestBed.game and DevTestBed.game.mode == "war" then
+        return DevTestBed.GetWarTeamTable()
+    end
+
+    return DevTestBed.savedVars and DevTestBed.savedVars.items or {}
+end
+
 function DevTestBed.AddSelectedFurniture(name)
 
     -- Normalize and trim the provided name
@@ -501,6 +541,195 @@ function DevTestBed.AddSelectedFurniture(name)
 end
 
 
+
+
+
+--[[
+    DevTestBed.AddSelectedWarTeam
+
+    Creates or replaces a War team assignment.
+
+    War team rules:
+        - Multiple teams may use the same furnishing type
+        - Each team using that furnishing type must have a different win state
+        - The maximum number of teams for one furnishing type is the number of
+          object states that furnishing supports
+]]
+function DevTestBed.AddSelectedWarTeam(name)
+    name = tostring(name or ""):match("^%s*(.-)%s*$")
+
+    if name == "" then
+        DevTestBed.Print("Use: /dtb war add <name>")
+        return
+    end
+
+    if not DevTestBed.IsInHouse(true) then return end
+
+    if not HasAnyEditingPermissionsForCurrentHouse() then
+        DevTestBed.Print("You must have housing editor permissions to use this command.")
+        return
+    end
+
+    local furnitureId = HousingEditorGetSelectedFurnitureId()
+    if not furnitureId then
+        DevTestBed.Print("Open the housing editor and select an item first.")
+        return
+    end
+
+    local numStates = GetPlacedHousingFurnitureNumObjectStates(furnitureId)
+    if not numStates or numStates < 2 then
+        DevTestBed.Print("War teams require an interactable object with at least two states.")
+        return
+    end
+
+    local currentState = GetPlacedHousingFurnitureCurrentObjectStateIndex(furnitureId)
+    if currentState == nil then
+        DevTestBed.Print("Could not read the selected item's current state.")
+        return
+    end
+
+    currentState = tonumber(currentState)
+
+    local itemName, _, furnitureDataId = GetPlacedHousingFurnitureInfo(furnitureId)
+    if not furnitureDataId then
+        DevTestBed.Print("Could not read the selected item's furnitureDataId.")
+        return
+    end
+
+    local warTeams = DevTestBed.GetWarTeamTable()
+    local newKey = string.lower(name)
+    local sameItemTeamCount = 0
+
+    for existingKey, entry in pairs(warTeams) do
+        if existingKey ~= newKey and tonumber(entry.furnitureDataId) == tonumber(furnitureDataId) then
+            sameItemTeamCount = sameItemTeamCount + 1
+
+            if tonumber(entry.state) == currentState then
+                DevTestBed.Print(zo_strformat(
+                    "War team not saved. |c00FF00<<1>>|r already uses |cFFFF00<<2>>|r for this item.",
+                    tostring(entry.name or existingKey),
+                    tostring(entry.stateName or ("State " .. tostring(currentState)))
+                ))
+                return
+            end
+        end
+    end
+
+    local existingEntry = warTeams[newKey]
+    local isReplacingSameItem = existingEntry and tonumber(existingEntry.furnitureDataId) == tonumber(furnitureDataId)
+
+    if not isReplacingSameItem and sameItemTeamCount >= tonumber(numStates) then
+        DevTestBed.Print(zo_strformat(
+            "War team not saved. This item has only |cFFFF00<<1>>|r state(s), so it can only support |cFFFF00<<1>>|r War team(s).",
+            tostring(numStates)
+        ))
+        return
+    end
+
+    local matchingFurniture, matchingCount = DevTestBed.GetMatchingHouseFurniture(furnitureDataId)
+    local stateName = DevTestBed.GetStateDisplayName(furnitureId, currentState)
+
+    warTeams[newKey] = {
+        name = name,
+        itemName = itemName,
+        furnitureDataId = furnitureDataId,
+        state = currentState,
+        stateName = stateName,
+        numStates = numStates,
+        matchingCount = matchingCount,
+        furnitureIds = matchingFurniture,
+    }
+
+    DevTestBed.Print(zo_strformat(
+        "Saved War team |c00FF00<<1>>|r as |c00FF00<<2>>|r - Win State |cFFFF00<<3>>|r - Found |c00FF00<<4>>|r matching item(s)",
+        tostring(name),
+        tostring(itemName),
+        tostring(stateName),
+        tostring(matchingCount)
+    ))
+
+    if DevTestBed.ui and DevTestBed.ui.controlWindow then
+        DevTestBed.PopulateControlCountDropdown()
+        DevTestBed.RefreshControlWindow()
+    end
+end
+
+function DevTestBed.ListWarTeams()
+    local warTeams = DevTestBed.GetWarTeamTable()
+    local count = 0
+
+    for key, entry in pairs(warTeams) do
+        count = count + 1
+        DevTestBed.Print(zo_strformat(
+            "War Team: |c00FF00<<1>>|r - Item: |c00FF00<<2>>|r - Win State: |cFFFF00<<3>>|r (<<4>>) - Matching: |c00FF00<<5>>|r",
+            tostring(entry.name or key),
+            tostring(entry.itemName or "Unknown"),
+            tostring(entry.stateName or "Unknown"),
+            tostring(entry.state or "?"),
+            tostring(entry.matchingCount or 0)
+        ))
+    end
+
+    if count == 0 then
+        DevTestBed.Print("No War teams have been created.")
+        return
+    end
+
+    DevTestBed.Print("Listed " .. tostring(count) .. " War team(s).")
+end
+
+function DevTestBed.DeleteWarTeam(name)
+    name = tostring(name or ""):match("^%s*(.-)%s*$")
+
+    if name == "" then
+        DevTestBed.Print("Use: /dtb war delete <name>")
+        return
+    end
+
+    local warTeams = DevTestBed.GetWarTeamTable()
+    local key = string.lower(name)
+    local entry = warTeams[key]
+
+    if not entry then
+        DevTestBed.Print("No War team found with name: " .. tostring(name))
+        return
+    end
+
+    warTeams[key] = nil
+
+    DevTestBed.Print(zo_strformat(
+        "Deleted War team |c00FF00<<1>>|r (Item: |c00FF00<<2>>|r)",
+        tostring(entry.name or name),
+        tostring(entry.itemName or "Unknown")
+    ))
+
+    if DevTestBed.ui and DevTestBed.ui.controlWindow then
+        DevTestBed.PopulateControlCountDropdown()
+        DevTestBed.RefreshControlWindow()
+    end
+end
+
+function DevTestBed.DeleteAllWarTeams()
+    local warTeams = DevTestBed.GetWarTeamTable()
+    local count = 0
+
+    for _ in pairs(warTeams) do
+        count = count + 1
+    end
+
+    DevTestBed.savedVars.warTeams = {}
+
+    if count == 0 then
+        DevTestBed.Print("No War teams to delete.")
+    else
+        DevTestBed.Print("Deleted " .. tostring(count) .. " War team(s).")
+    end
+
+    if DevTestBed.ui and DevTestBed.ui.controlWindow then
+        DevTestBed.PopulateControlCountDropdown()
+        DevTestBed.RefreshControlWindow()
+    end
+end
 
 --[[
     DevTestBed.ListTeams
@@ -808,7 +1037,7 @@ function DevTestBed.RefreshGameStatusWindow()
         dataList[i] = nil
     end
 
-    for key, entry in pairs(DevTestBed.savedVars.items or {}) do
+    for key, entry in pairs(DevTestBed.GetActiveGameTeamTable()) do
         if entry.trackedFurnitureIds or game.active then
             table.insert(dataList, ZO_ScrollList_CreateDataEntry(
                 DevTestBed.GAME_STATUS_ROW_DATA_TYPE,
@@ -896,6 +1125,15 @@ function DevTestBed.RefreshTeamMatchingCounts()
             entry.matchingCount = matchingCount
         end
     end
+
+    DevTestBed.savedVars.warTeams = DevTestBed.savedVars.warTeams or {}
+    for _, entry in pairs(DevTestBed.savedVars.warTeams) do
+        if entry.furnitureDataId then
+            local matchingFurniture, matchingCount = DevTestBed.GetMatchingHouseFurniture(entry.furnitureDataId)
+            entry.furnitureIds = matchingFurniture
+            entry.matchingCount = matchingCount
+        end
+    end
 end
 
 function DevTestBed.GetControlPanelCountInfo(mode, skipRescan)
@@ -903,6 +1141,38 @@ function DevTestBed.GetControlPanelCountInfo(mode, skipRescan)
 
     if not skipRescan then
         DevTestBed.RefreshTeamMatchingCounts()
+    end
+
+    if mode == "war" then
+        local warTeamCount = 0
+        local firstFurnitureDataId = nil
+        local matchingCount = nil
+        local sameItem = true
+
+        for _, entry in pairs(DevTestBed.savedVars and DevTestBed.savedVars.warTeams or {}) do
+            warTeamCount = warTeamCount + 1
+
+            if firstFurnitureDataId == nil then
+                firstFurnitureDataId = entry.furnitureDataId
+                matchingCount = tonumber(entry.matchingCount or 0) or 0
+            elseif tonumber(entry.furnitureDataId) ~= tonumber(firstFurnitureDataId) then
+                sameItem = false
+            end
+        end
+
+        if warTeamCount == 0 then
+            return 0, "No War teams assigned", warTeamCount
+        end
+
+        if not sameItem then
+            return 0, "War teams use different items", warTeamCount
+        end
+
+        if tonumber(matchingCount or 0) < 1 then
+            return 0, "No matching items found", warTeamCount
+        end
+
+        return tonumber(matchingCount), nil, warTeamCount
     end
 
     local teamCount = 0
@@ -984,11 +1254,18 @@ function DevTestBed.PopulateControlModeDropdown()
 
     addMode("Threshold", "threshold")
     addMode("Target", "target")
+    addMode("War", "war")
 
     DevTestBed.ui.selectedGameMode = DevTestBed.ui.selectedGameMode or "threshold"
 
     if combo.SelectItemByIndex then
-        combo:SelectItemByIndex(DevTestBed.ui.selectedGameMode == "target" and 2 or 1)
+        local selectedIndex = 1
+        if DevTestBed.ui.selectedGameMode == "target" then
+            selectedIndex = 2
+        elseif DevTestBed.ui.selectedGameMode == "war" then
+            selectedIndex = 3
+        end
+        combo:SelectItemByIndex(selectedIndex)
     elseif combo.SelectFirstItem then
         combo:SelectFirstItem()
     end
@@ -1027,6 +1304,19 @@ function DevTestBed.PopulateControlCountDropdown()
         DevTestBed.ui.selectedRequiredCount = nil
         combo:AddItem(combo:CreateItemEntry("No valid count", function()
             DevTestBed.ui.selectedRequiredCount = nil
+        end))
+
+        if combo.SelectFirstItem then
+            combo:SelectFirstItem()
+        end
+        return
+    end
+
+    if mode == "war" then
+        DevTestBed.ui.selectedRequiredCount = maxCount
+        combo:AddItem(combo:CreateItemEntry("All Items (" .. tostring(maxCount) .. ")", function()
+            DevTestBed.ui.selectedRequiredCount = maxCount
+            DevTestBed.RefreshControlWindow()
         end))
 
         if combo.SelectFirstItem then
@@ -1187,7 +1477,9 @@ function DevTestBed.CreateControlWindow()
             return
         end
 
-        if mode == "target" then
+        if mode == "war" then
+            DevTestBed.StartWarMode(minutes)
+        elseif mode == "target" then
             DevTestBed.StartTargetMode(count, minutes)
         else
             DevTestBed.StartThresholdMode(count, minutes)
@@ -1272,8 +1564,15 @@ function DevTestBed.RefreshControlWindow()
 
         local countText = ""
         if canStart then
-            local suffix = mode == "threshold" and "All Items" or "Max"
-            countText = zo_strformat("Teams: <<1>>\nAvailable Count: 1 - <<2>> (<<3>>)\n", tostring(teamCount), tostring(maxCount), suffix)
+            local suffix = "Max"
+            local rangeText = "1 - " .. tostring(maxCount)
+            if mode == "threshold" then
+                suffix = "All Items"
+            elseif mode == "war" then
+                suffix = "All Items"
+                rangeText = tostring(maxCount)
+            end
+            countText = zo_strformat("Teams: <<1>>\nAvailable Count: <<2>> (<<3>>)\n", tostring(teamCount), rangeText, suffix)
         else
             countText = zo_strformat("Teams: <<1>>\nAvailable Count: <<2>>\n", tostring(teamCount or 0), tostring(reason or "Unavailable"))
         end
@@ -1416,12 +1715,23 @@ function DevTestBed.ClearRuntimeTeamGameData()
         entry.currentWinCount = nil
         entry.lastStates = nil
     end
+
+    for _, entry in pairs(DevTestBed.savedVars and DevTestBed.savedVars.warTeams or {}) do
+        entry.trackedFurnitureIds = nil
+        entry.requiredWinCount = nil
+        entry.currentWinCount = nil
+        entry.lastStates = nil
+        entry.pendingStates = nil
+        entry.pendingSinceMs = nil
+        entry.appliedStates = nil
+    end
 end
 
 function DevTestBed.StopThresholdGame(clearWinner)
     EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "ThresholdWatcher")
     EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "TargetWatcher")
     EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "TargetDecoyRandomizer")
+    EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "WarWatcher")
     EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "WinnerPulse")
     DevTestBed.ClearRuntimeTeamGameData()
 
@@ -1437,6 +1747,7 @@ function DevTestBed.StopThresholdGame(clearWinner)
     DevTestBed.game.pulseIndex = 0
     DevTestBed.game.pulsePreviousFurnitureId = nil
     DevTestBed.game.pulseIntervalMs = 1500
+    DevTestBed.game.warNeutralState = nil
     DevTestBed.game.startTimeMs = nil
     DevTestBed.game.endTimeMs = nil
     DevTestBed.game.frozenTimeMs = nil
@@ -1489,36 +1800,76 @@ function DevTestBed.TryPlayWinnerSound()
     end
 end
 
+function DevTestBed.GetWinnerPulseFurnitureIds(winnerKey, entry)
+    local pulseIds = {}
+
+    if not entry or not entry.trackedFurnitureIds then
+        return pulseIds
+    end
+
+    local winningState = tonumber(entry.state)
+
+    -- War mode should only pulse the items that are actually counted for the
+    -- winning team: the furnishings whose applied/stable state is currently
+    -- that team's win state. This prevents the full War item set from flashing.
+    if DevTestBed.game and DevTestBed.game.mode == "war" then
+        local appliedStates = entry.appliedStates or {}
+
+        for _, furnitureInfo in ipairs(entry.trackedFurnitureIds or {}) do
+            local furnitureId = furnitureInfo and furnitureInfo.furnitureId
+
+            if furnitureId and appliedStates[furnitureId] ~= nil and tonumber(appliedStates[furnitureId]) == winningState then
+                table.insert(pulseIds, furnitureId)
+            end
+        end
+
+        return pulseIds
+    end
+
+    -- Threshold/Target keep the existing behavior: pulse the winning team's
+    -- tracked items in sequence.
+    for _, furnitureInfo in ipairs(entry.trackedFurnitureIds or {}) do
+        local furnitureId = furnitureInfo and furnitureInfo.furnitureId
+
+        if furnitureId then
+            table.insert(pulseIds, furnitureId)
+        end
+    end
+
+    return pulseIds
+end
+
 function DevTestBed.StartWinnerPulse(winnerKey)
     EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "WinnerPulse")
 
-    local entry = DevTestBed.savedVars.items and DevTestBed.savedVars.items[winnerKey]
+    local entry = DevTestBed.GetActiveGameTeamTable()[winnerKey]
     if not entry or not entry.trackedFurnitureIds then
         return
     end
 
     DevTestBed.game.pulseTeamKey = winnerKey
     DevTestBed.game.pulseFurnitureLookup = {}
-    DevTestBed.game.pulseSequence = {}
+    DevTestBed.game.pulseSequence = DevTestBed.GetWinnerPulseFurnitureIds(winnerKey, entry)
     DevTestBed.game.pulseIndex = 0
     DevTestBed.game.pulsePreviousFurnitureId = nil
     DevTestBed.game.pulseIntervalMs = 1500
 
-    for _, furnitureInfo in ipairs(entry.trackedFurnitureIds) do
-        if furnitureInfo and furnitureInfo.furnitureId then
-            table.insert(DevTestBed.game.pulseSequence, furnitureInfo.furnitureId)
-            DevTestBed.game.pulseFurnitureLookup[furnitureInfo.furnitureId] = true
+    for _, furnitureId in ipairs(DevTestBed.game.pulseSequence or {}) do
+        if furnitureId then
+            DevTestBed.game.pulseFurnitureLookup[furnitureId] = true
         end
     end
 
-    if #DevTestBed.game.pulseSequence == 0 then
+    if #(DevTestBed.game.pulseSequence or {}) == 0 then
+        DevTestBed.Dbg("Winner pulse skipped because no winning-state furniture was found.")
         return
     end
 
     -- Pulse one item at a time instead of flashing the entire winning team at once.
-    -- This keeps state-change requests much lower and creates a sequential chase effect.
+    -- For War mode, the sequence contains only the items that were in the
+    -- winning team's stable win state when the winner was declared.
     EVENT_MANAGER:RegisterForUpdate(DevTestBed.name .. "WinnerPulse", DevTestBed.game.pulseIntervalMs, function()
-        local pulseEntry = DevTestBed.savedVars.items and DevTestBed.savedVars.items[winnerKey]
+        local pulseEntry = DevTestBed.GetActiveGameTeamTable()[winnerKey]
         local sequence = DevTestBed.game.pulseSequence or {}
 
         if not DevTestBed.game.locked or not pulseEntry or not pulseEntry.trackedFurnitureIds or #sequence == 0 then
@@ -1527,11 +1878,18 @@ function DevTestBed.StartWinnerPulse(winnerKey)
         end
 
         local winningState = tonumber(pulseEntry.state)
-        local nonWinningState = DevTestBed.GetNonWinningState(winningState)
+        local flashState = DevTestBed.GetNonWinningState(winningState)
 
-        -- Turn the previously highlighted item back off before lighting the next one.
+        -- War mode can have an unused/neutral state. When present, use that
+        -- neutral state as the flash-away state instead of another team's color.
+        if DevTestBed.game.mode == "war" and DevTestBed.game.warNeutralState ~= nil then
+            flashState = tonumber(DevTestBed.game.warNeutralState)
+        end
+
+        -- Turn the previously highlighted item back to the flash-away state
+        -- before lighting the next one.
         if DevTestBed.game.pulsePreviousFurnitureId then
-            HousingEditorRequestChangeState(DevTestBed.game.pulsePreviousFurnitureId, nonWinningState)
+            HousingEditorRequestChangeState(DevTestBed.game.pulsePreviousFurnitureId, flashState)
         end
 
         DevTestBed.game.pulseIndex = (tonumber(DevTestBed.game.pulseIndex or 0) % #sequence) + 1
@@ -1558,7 +1916,7 @@ function DevTestBed.GetHighestPercentTeams()
     local highestPercent = nil
     local leaders = {}
 
-    for key, entry in pairs(DevTestBed.savedVars.items or {}) do
+    for key, entry in pairs(DevTestBed.GetActiveGameTeamTable()) do
         if entry.trackedFurnitureIds then
             local currentCount = tonumber(entry.currentWinCount or 0) or 0
             local requiredCount = tonumber(entry.requiredWinCount or DevTestBed.game.threshold or 0) or 0
@@ -2201,6 +2559,359 @@ function DevTestBed.StartTargetMode(targetCount, timeLimitMinutes)
 end
 
 
+
+
+function DevTestBed.GetUnusedWarState(numStates, usedStates)
+    numStates = tonumber(numStates or 0) or 0
+    usedStates = usedStates or {}
+
+    for state = 0, numStates - 1 do
+        if not usedStates[state] then
+            return state
+        end
+    end
+
+    return nil
+end
+
+function DevTestBed.GetBalancedWarStateAssignments(matchingFurniture, availableStates)
+    local assignments = {}
+    local shuffledFurniture = DevTestBed.ShuffleFurnitureList(matchingFurniture or {})
+    local shuffledStates = DevTestBed.ShuffleFurnitureList(availableStates or {})
+
+    if #shuffledStates == 0 then
+        return assignments
+    end
+
+    -- Assign states in a shuffled round-robin pattern. This keeps counts as
+    -- equal as possible while still making the starting layout feel random.
+    for index, furnitureInfo in ipairs(shuffledFurniture) do
+        local stateIndex = ((index - 1) % #shuffledStates) + 1
+        table.insert(assignments, {
+            furnitureInfo = furnitureInfo,
+            state = shuffledStates[stateIndex],
+        })
+    end
+
+    return assignments
+end
+
+function DevTestBed.GetRandomWarState(numStates)
+    numStates = tonumber(numStates or 0) or 0
+    if numStates < 1 then
+        return 0
+    end
+
+    return math.random(0, numStates - 1)
+end
+
+function DevTestBed.GetWarStableDelayMs()
+    return 5000
+end
+
+function DevTestBed.UpdateWarAppliedState(entry, furnitureId, currentState, nowMs)
+    if not entry or not furnitureId or currentState == nil then
+        return nil
+    end
+
+    entry.pendingStates = entry.pendingStates or {}
+    entry.pendingSinceMs = entry.pendingSinceMs or {}
+    entry.appliedStates = entry.appliedStates or {}
+
+    currentState = tonumber(currentState)
+    local pendingState = entry.pendingStates[furnitureId]
+
+    -- A new observed state starts/restarts the five-second stability timer.
+    if pendingState == nil or tonumber(pendingState) ~= currentState then
+        entry.pendingStates[furnitureId] = currentState
+        entry.pendingSinceMs[furnitureId] = nowMs
+        return entry.appliedStates[furnitureId]
+    end
+
+    local sinceMs = tonumber(entry.pendingSinceMs[furnitureId] or nowMs) or nowMs
+    if nowMs - sinceMs >= DevTestBed.GetWarStableDelayMs() then
+        entry.appliedStates[furnitureId] = currentState
+    end
+
+    return entry.appliedStates[furnitureId]
+end
+
+function DevTestBed.CheckWarGameState()
+    if not DevTestBed.game or not DevTestBed.game.active or DevTestBed.game.mode ~= "war" then
+        EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "WarWatcher")
+        return
+    end
+
+    if not DevTestBed.IsInHouse(false) then
+        DevTestBed.ClearActiveGameDueToLeavingHouse()
+        return
+    end
+
+    local nowMs = DevTestBed.GetNowMs()
+    local currentTimerSecond = math.floor(nowMs / 1000)
+    if not DevTestBed.game.locked and DevTestBed.game.lastTimerRefreshSecond ~= currentTimerSecond then
+        DevTestBed.game.lastTimerRefreshSecond = currentTimerSecond
+        DevTestBed.RefreshGameStatusWindow()
+        DevTestBed.RefreshControlWindow()
+    end
+
+    local pulseLookup = DevTestBed.game.pulseFurnitureLookup or {}
+
+    for key, entry in pairs(DevTestBed.GetWarTeamTable()) do
+        if entry.trackedFurnitureIds then
+            local winningState = tonumber(entry.state)
+            local currentWinCount = 0
+
+            entry.lastStates = entry.lastStates or {}
+            entry.pendingStates = entry.pendingStates or {}
+            entry.pendingSinceMs = entry.pendingSinceMs or {}
+            entry.appliedStates = entry.appliedStates or {}
+
+            for _, furnitureInfo in ipairs(entry.trackedFurnitureIds) do
+                local furnitureId = furnitureInfo and furnitureInfo.furnitureId
+
+                if furnitureId then
+                    local currentState = GetPlacedHousingFurnitureCurrentObjectStateIndex(furnitureId)
+
+                    if currentState ~= nil then
+                        currentState = tonumber(currentState)
+
+                        if DevTestBed.game.locked then
+                            local previousState = entry.lastStates[furnitureId]
+                            if not pulseLookup[furnitureId] and previousState ~= nil and tonumber(previousState) ~= currentState then
+                                HousingEditorRequestChangeState(furnitureId, previousState)
+                                currentState = tonumber(previousState)
+                            end
+                        else
+                            entry.lastStates[furnitureId] = currentState
+
+                            -- War mode only counts a state after the item has remained
+                            -- unchanged in that state for five seconds. If the state changes
+                            -- again before the delay expires, the pending timer restarts.
+                            DevTestBed.UpdateWarAppliedState(entry, furnitureId, currentState, nowMs)
+                        end
+
+                        local appliedState = entry.appliedStates[furnitureId]
+                        if appliedState ~= nil and tonumber(appliedState) == winningState then
+                            currentWinCount = currentWinCount + 1
+                        end
+                    end
+                end
+            end
+
+            if not DevTestBed.game.locked then
+                entry.currentWinCount = currentWinCount
+                DevTestBed.RefreshGameStatusWindow()
+
+                if currentWinCount >= tonumber(entry.requiredWinCount or DevTestBed.game.threshold or 0) then
+                    DevTestBed.DeclareThresholdWinner(key, entry)
+                    return
+                end
+            end
+        end
+    end
+
+    if not DevTestBed.game.locked then
+        DevTestBed.CheckThresholdTimerExpired()
+    end
+end
+
+function DevTestBed.StartWarMode(timeLimitMinutes)
+    if not DevTestBed.IsInHouse(true) then return end
+
+    if not HasAnyEditingPermissionsForCurrentHouse() then
+        DevTestBed.Print("You must have housing editor permissions to use this command.")
+        return
+    end
+
+    timeLimitMinutes = tonumber(timeLimitMinutes)
+
+    if timeLimitMinutes ~= nil then
+        if timeLimitMinutes < 1 or timeLimitMinutes > 60 or timeLimitMinutes ~= math.floor(timeLimitMinutes) then
+            DevTestBed.Print("Use: /dtb start war [minutes]")
+            DevTestBed.Print("Optional minutes must be a whole number from 1 to 60.")
+            return
+        end
+    end
+
+    local warTeams = DevTestBed.GetWarTeamTable()
+    local teamCount = 0
+    local firstFurnitureDataId = nil
+    local sameItem = true
+    local matchingFurniture = nil
+    local matchingCount = 0
+    local numStates = nil
+
+    DevTestBed.StopThresholdGame(true)
+
+    for key, entry in pairs(warTeams) do
+        teamCount = teamCount + 1
+
+        if firstFurnitureDataId == nil then
+            firstFurnitureDataId = entry.furnitureDataId
+        elseif tonumber(entry.furnitureDataId) ~= tonumber(firstFurnitureDataId) then
+            sameItem = false
+        end
+    end
+
+    if teamCount == 0 then
+        DevTestBed.Print("No War teams have been created.")
+        return
+    end
+
+    if not sameItem then
+        DevTestBed.Print("War mode cancelled. All War teams must use the same furnishing item.")
+        return
+    end
+
+    matchingFurniture, matchingCount = DevTestBed.GetMatchingHouseFurniture(firstFurnitureDataId)
+
+    if matchingCount < 1 then
+        DevTestBed.Print("War mode cancelled. No matching placed items were found for the War item.")
+        return
+    end
+
+    local firstFurnitureId = matchingFurniture[1] and matchingFurniture[1].furnitureId
+    if firstFurnitureId then
+        numStates = GetPlacedHousingFurnitureNumObjectStates(firstFurnitureId)
+    end
+
+    if not numStates or numStates < 2 then
+        DevTestBed.Print("War mode cancelled. The War item must have at least two states.")
+        return
+    end
+
+    if teamCount > numStates then
+        DevTestBed.Print(zo_strformat(
+            "War mode cancelled. This item has |cFFFF00<<1>>|r state(s), so it can only support |cFFFF00<<1>>|r War team(s).",
+            tostring(numStates)
+        ))
+        return
+    end
+
+    local usedStates = {}
+    for key, entry in pairs(warTeams) do
+        local state = tonumber(entry.state)
+
+        if state == nil or state < 0 or state >= numStates then
+            DevTestBed.Print(zo_strformat(
+                "War mode cancelled. Team |c00FF00<<1>>|r has an invalid win state.",
+                tostring(entry.name or key)
+            ))
+            DevTestBed.ClearRuntimeTeamGameData()
+            return
+        end
+
+        if usedStates[state] then
+            DevTestBed.Print("War mode cancelled. Two War teams are using the same win state.")
+            DevTestBed.ClearRuntimeTeamGameData()
+            return
+        end
+
+        usedStates[state] = true
+
+        entry.furnitureIds = matchingFurniture
+        entry.trackedFurnitureIds = matchingFurniture
+        entry.matchingCount = matchingCount
+        entry.requiredWinCount = matchingCount
+        entry.currentWinCount = 0
+        entry.lastStates = {}
+        entry.pendingStates = {}
+        entry.pendingSinceMs = {}
+        entry.appliedStates = {}
+    end
+
+    local changedStartStateCount = 0
+    local randomizeStartMs = DevTestBed.GetNowMs()
+    local neutralState = DevTestBed.GetUnusedWarState(numStates, usedStates)
+    local startAssignments = {}
+
+    DevTestBed.SeedRandomOnce()
+
+    if neutralState ~= nil then
+        -- If there is an unused state, use it as a neutral starting color for
+        -- every item. It is also used later as the winner flash-away state.
+        for _, furnitureInfo in ipairs(matchingFurniture) do
+            table.insert(startAssignments, {
+                furnitureInfo = furnitureInfo,
+                state = neutralState,
+            })
+        end
+    else
+        -- If every state is owned by a War team, assign starting states using
+        -- a shuffled round-robin distribution so the colors stay as equal as
+        -- possible while still being randomized.
+        local availableStates = {}
+        for state = 0, numStates - 1 do
+            table.insert(availableStates, state)
+        end
+
+        startAssignments = DevTestBed.GetBalancedWarStateAssignments(matchingFurniture, availableStates)
+    end
+
+    for _, assignment in ipairs(startAssignments) do
+        local furnitureInfo = assignment.furnitureInfo
+        local furnitureId = furnitureInfo and furnitureInfo.furnitureId
+        local startState = tonumber(assignment.state)
+
+        if furnitureId and startState ~= nil then
+            HousingEditorRequestChangeState(furnitureId, startState)
+            changedStartStateCount = changedStartStateCount + 1
+
+            for _, entry in pairs(warTeams) do
+                entry.lastStates[furnitureId] = startState
+                entry.pendingStates[furnitureId] = startState
+                entry.pendingSinceMs[furnitureId] = randomizeStartMs
+                entry.appliedStates[furnitureId] = nil
+            end
+        end
+    end
+
+    DevTestBed.game.active = true
+    DevTestBed.game.mode = "war"
+    DevTestBed.game.threshold = matchingCount
+    DevTestBed.game.winner = nil
+    DevTestBed.game.winnerKey = nil
+    DevTestBed.game.locked = false
+    DevTestBed.game.pulseFurnitureLookup = {}
+    DevTestBed.game.pulseSequence = {}
+    DevTestBed.game.pulseIndex = 0
+    DevTestBed.game.pulsePreviousFurnitureId = nil
+    DevTestBed.game.pulseIntervalMs = 1500
+    DevTestBed.game.warNeutralState = neutralState
+    DevTestBed.game.startTimeMs = DevTestBed.GetNowMs()
+    DevTestBed.game.timeLimitMinutes = timeLimitMinutes
+    DevTestBed.game.endTimeMs = timeLimitMinutes and (DevTestBed.game.startTimeMs + (timeLimitMinutes * 60 * 1000)) or nil
+    DevTestBed.game.frozenTimeMs = nil
+    DevTestBed.game.overtime = false
+    DevTestBed.game.lastTimerRefreshSecond = nil
+
+    EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "WarWatcher")
+    EVENT_MANAGER:RegisterForUpdate(DevTestBed.name .. "WarWatcher", 250, DevTestBed.CheckWarGameState)
+
+    DevTestBed.ShowGameStatusWindow()
+
+    local startModeText = "balanced random starting states"
+    if neutralState ~= nil then
+        startModeText = "neutral state " .. tostring(neutralState)
+    end
+
+    DevTestBed.Print(zo_strformat(
+        "Started War mode. Tracking |c00FF00<<1>>|r War team(s) across |c00FF00<<2>>|r item(s). Starting with |cFFFF00<<3>>|r. States count only after remaining unchanged for 5 seconds.",
+        tostring(teamCount),
+        tostring(matchingCount),
+        tostring(startModeText)
+    ))
+
+    if changedStartStateCount > 0 then
+        DevTestBed.Dbg("Set " .. tostring(changedStartStateCount) .. " War item(s) to their starting state.")
+    end
+
+    if DevTestBed.ui and DevTestBed.ui.controlWindow then
+        DevTestBed.RefreshControlWindow()
+    end
+end
+
 --[[
     DevTestBed.Start
 
@@ -2361,6 +3072,25 @@ function DevTestBed.ResetGame()
         end
     end
 
+    for key, entry in pairs(DevTestBed.savedVars.warTeams or {}) do
+        teamCount = teamCount + 1
+
+        if entry.furnitureDataId then
+            local matchingFurniture, matchingCount = DevTestBed.GetMatchingHouseFurniture(entry.furnitureDataId)
+            entry.furnitureIds = matchingFurniture
+            entry.matchingCount = matchingCount
+
+            for _, furnitureInfo in ipairs(matchingFurniture) do
+                local furnitureId = furnitureInfo and furnitureInfo.furnitureId
+                if furnitureId then
+                    scannedCount = scannedCount + 1
+                    HousingEditorRequestChangeState(furnitureId, 0)
+                    changedCount = changedCount + 1
+                end
+            end
+        end
+    end
+
     DevTestBed.HideGameStatusWindow()
 
     if teamCount == 0 then
@@ -2426,6 +3156,37 @@ function DevTestBed.HandleSlashCommand(args)
         return
     end
 
+    if cmd == "war" then
+        local subCmd, subRest = string.match(rest or "", "^(%S*)%s*(.-)%s*$")
+        subCmd = string.lower(subCmd or "")
+
+        if subCmd == "add" then
+            DevTestBed.AddSelectedWarTeam(subRest)
+            return
+        end
+
+        if subCmd == "teams" or subCmd == "list" then
+            DevTestBed.ListWarTeams()
+            return
+        end
+
+        if subCmd == "delete" then
+            DevTestBed.DeleteWarTeam(subRest)
+            return
+        end
+
+        if subCmd == "deleteall" then
+            DevTestBed.DeleteAllWarTeams()
+            return
+        end
+
+        DevTestBed.Print("Use: /dtb war add <name>")
+        DevTestBed.Print("Use: /dtb war teams")
+        DevTestBed.Print("Use: /dtb war delete <name>")
+        DevTestBed.Print("Use: /dtb war deleteall")
+        return
+    end
+
     if cmd == "reset" then
         DevTestBed.ResetGame()
         return
@@ -2434,6 +3195,22 @@ function DevTestBed.HandleSlashCommand(args)
     if cmd == "start" then
         local mode, countText = string.match(rest or "", "^(%S*)%s*(.-)$")
         mode = string.lower(mode or "")
+
+        if mode == "war" then
+            local minutesText, extraText = string.match(countText or "", "^(%S*)%s*(.-)%s*$")
+
+            if extraText and extraText ~= "" then
+                DevTestBed.Print("Use: /dtb start war [minutes]")
+                return
+            end
+
+            if minutesText == "" then
+                minutesText = nil
+            end
+
+            DevTestBed.StartWarMode(minutesText)
+            return
+        end
 
         if mode == "threshold" or mode == "target" then
             local countValue, minutesText, extraText = string.match(countText or "", "^(%S*)%s*(%S*)%s*(.-)%s*$")
@@ -2462,6 +3239,7 @@ function DevTestBed.HandleSlashCommand(args)
 
         DevTestBed.Print("Use: /dtb start threshold <count> [minutes]")
         DevTestBed.Print("Use: /dtb start target <count> [minutes]")
+        DevTestBed.Print("Use: /dtb start war [minutes]")
         return
     end
 
@@ -2498,6 +3276,8 @@ function DevTestBed.OnAddonLoaded(eventCode, addonName)
         nil,
         DEFAULT_SAVED_VARIABLES
     )
+
+    DevTestBed.savedVars.warTeams = DevTestBed.savedVars.warTeams or {}
 
     SLASH_COMMANDS["/devtestbed"] = DevTestBed.HandleSlashCommand
     SLASH_COMMANDS["/dtb"] = DevTestBed.HandleSlashCommand
