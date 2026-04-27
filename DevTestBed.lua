@@ -30,6 +30,7 @@ function DevTestBed.ShowHelp()
     DevTestBed.Print("/dtb delete <name> - Delete a team")
     DevTestBed.Print("/dtb deleteall - Delete all teams")
     DevTestBed.Print("/dtb start threshold <count> - Reset all team items to non-winning state, then track all team items and win when count are in the winning state")
+    DevTestBed.Print("/dtb window - Toggle the game status window")
 end
 
 
@@ -622,6 +623,207 @@ function DevTestBed.DeleteAllTeams()
 end
 
 
+
+--[[
+    DevTestBed Game Status Window
+
+    Creates and manages a small movable/resizable status window used while a
+    game is running. The window shows:
+        - Current game mode
+        - Team name and item name
+        - Current win count / required win count / percent complete
+        - Winner information once a team wins
+
+    The window can be toggled with:
+        /dtb window
+]]
+DevTestBed.ui = DevTestBed.ui or {}
+
+DevTestBed.GAME_STATUS_ROW_DATA_TYPE = 1
+DevTestBed.GAME_STATUS_ROW_HEIGHT = 58
+
+function DevTestBed.SetupGameStatusRow(control, data)
+    if not control or not data then return end
+
+    local percent = 0
+    if tonumber(data.requiredCount or 0) > 0 then
+        percent = math.floor((tonumber(data.currentCount or 0) / tonumber(data.requiredCount)) * 100)
+    end
+
+    control:SetFont("ZoFontGame")
+    control:SetColor(1, 1, 1, 1)
+    control:SetText(zo_strformat(
+        "|c00FF00<<1>>|r - <<2>>\n<<3>> / <<4>>  <<5>>%",
+        tostring(data.teamName or "Unknown"),
+        tostring(data.itemName or "Unknown"),
+        tostring(data.currentCount or 0),
+        tostring(data.requiredCount or 0),
+        tostring(percent)
+    ))
+
+    if control.SetHorizontalAlignment then
+        control:SetHorizontalAlignment(TEXT_ALIGN_LEFT)
+    end
+
+    if control.SetVerticalAlignment then
+        control:SetVerticalAlignment(TEXT_ALIGN_CENTER)
+    end
+end
+
+function DevTestBed.CreateGameStatusWindow()
+    if DevTestBed.ui.statusWindow then
+        return DevTestBed.ui.statusWindow
+    end
+
+    local wm = WINDOW_MANAGER
+
+    local window = wm:CreateTopLevelWindow("DevTestBedGameStatusWindow")
+    window:SetDimensions(420, 360)
+    window:SetAnchor(CENTER, GuiRoot, CENTER, 0, 0)
+    window:SetMouseEnabled(true)
+    window:SetMovable(true)
+    window:SetClampedToScreen(true)
+    window:SetHidden(true)
+
+    if window.SetResizable then
+        window:SetResizable(true)
+    end
+
+    if window.SetResizeHandleSize then
+        window:SetResizeHandleSize(16)
+    end
+
+    if window.SetDimensionConstraints then
+        window:SetDimensionConstraints(300, 220, 900, 700)
+    end
+
+    local backdrop = wm:CreateControl("$(parent)Backdrop", window, CT_BACKDROP)
+    backdrop:SetAnchorFill(window)
+    backdrop:SetCenterColor(0, 0, 0, 0.82)
+    backdrop:SetEdgeColor(0.25, 0.55, 1, 1)
+    backdrop:SetEdgeTexture(nil, 1, 1, 2)
+
+    local title = wm:CreateControl("$(parent)Title", window, CT_LABEL)
+    title:SetAnchor(TOPLEFT, window, TOPLEFT, 12, 8)
+    title:SetAnchor(TOPRIGHT, window, TOPRIGHT, -36, 8)
+    title:SetFont("ZoFontWinH2")
+    title:SetColor(0.75, 0.9, 1, 1)
+    title:SetText("DevTestBed Game")
+
+    local closeButton = wm:CreateControl("$(parent)Close", window, CT_BUTTON)
+    closeButton:SetDimensions(24, 24)
+    closeButton:SetAnchor(TOPRIGHT, window, TOPRIGHT, -8, 6)
+    closeButton:SetFont("ZoFontGameBold")
+    closeButton:SetText("X")
+    closeButton:SetHandler("OnClicked", function()
+        window:SetHidden(true)
+    end)
+
+    local modeLabel = wm:CreateControl("$(parent)Mode", window, CT_LABEL)
+    modeLabel:SetAnchor(TOPLEFT, title, BOTTOMLEFT, 0, 8)
+    modeLabel:SetAnchor(TOPRIGHT, window, TOPRIGHT, -12, 40)
+    modeLabel:SetFont("ZoFontGameBold")
+    modeLabel:SetColor(1, 1, 1, 1)
+    modeLabel:SetText("Mode: None")
+
+    local winnerLabel = wm:CreateControl("$(parent)Winner", window, CT_LABEL)
+    winnerLabel:SetAnchor(TOPLEFT, modeLabel, BOTTOMLEFT, 0, 6)
+    winnerLabel:SetAnchor(TOPRIGHT, modeLabel, BOTTOMRIGHT, 0, 6)
+    winnerLabel:SetFont("ZoFontGameBold")
+    winnerLabel:SetColor(0, 1, 0, 1)
+    winnerLabel:SetText("")
+
+    local scrollList = wm:CreateControlFromVirtual("$(parent)ScrollList", window, "ZO_ScrollList")
+    scrollList:SetAnchor(TOPLEFT, winnerLabel, BOTTOMLEFT, 0, 10)
+    scrollList:SetAnchor(BOTTOMRIGHT, window, BOTTOMRIGHT, -12, -12)
+
+    ZO_ScrollList_AddDataType(
+        scrollList,
+        DevTestBed.GAME_STATUS_ROW_DATA_TYPE,
+        "ZO_SelectableLabel",
+        DevTestBed.GAME_STATUS_ROW_HEIGHT,
+        DevTestBed.SetupGameStatusRow
+    )
+
+    DevTestBed.ui.statusWindow = window
+    DevTestBed.ui.statusTitle = title
+    DevTestBed.ui.statusModeLabel = modeLabel
+    DevTestBed.ui.statusWinnerLabel = winnerLabel
+    DevTestBed.ui.statusScrollList = scrollList
+
+    window:SetHandler("OnResizeStop", function()
+        DevTestBed.RefreshGameStatusWindow()
+    end)
+
+    return window
+end
+
+function DevTestBed.RefreshGameStatusWindow()
+    if not DevTestBed.ui.statusWindow then
+        return
+    end
+
+    local game = DevTestBed.game or {}
+    local modeText = game.mode or "None"
+
+    DevTestBed.ui.statusModeLabel:SetText("Mode: " .. tostring(modeText))
+
+    if game.winner then
+        DevTestBed.ui.statusWinnerLabel:SetText("Winner: " .. tostring(game.winner))
+    else
+        DevTestBed.ui.statusWinnerLabel:SetText("")
+    end
+
+    local scrollList = DevTestBed.ui.statusScrollList
+    if not scrollList then
+        return
+    end
+
+    local dataList = ZO_ScrollList_GetDataList(scrollList)
+    for i = #dataList, 1, -1 do
+        dataList[i] = nil
+    end
+
+    for key, entry in pairs(DevTestBed.savedVars.items or {}) do
+        if entry.trackedFurnitureIds or game.active then
+            table.insert(dataList, ZO_ScrollList_CreateDataEntry(
+                DevTestBed.GAME_STATUS_ROW_DATA_TYPE,
+                {
+                    teamName = entry.name or key,
+                    itemName = entry.itemName or "Unknown",
+                    currentCount = entry.currentWinCount or 0,
+                    requiredCount = entry.requiredWinCount or game.threshold or 0,
+                }
+            ))
+        end
+    end
+
+    ZO_ScrollList_Commit(scrollList)
+end
+
+function DevTestBed.ShowGameStatusWindow()
+    local window = DevTestBed.CreateGameStatusWindow()
+    window:SetHidden(false)
+    DevTestBed.RefreshGameStatusWindow()
+end
+
+function DevTestBed.HideGameStatusWindow()
+    if DevTestBed.ui.statusWindow then
+        DevTestBed.ui.statusWindow:SetHidden(true)
+    end
+end
+
+function DevTestBed.ToggleGameStatusWindow()
+    local window = DevTestBed.CreateGameStatusWindow()
+
+    if window:IsHidden() then
+        window:SetHidden(false)
+        DevTestBed.RefreshGameStatusWindow()
+    else
+        window:SetHidden(true)
+    end
+end
+
 DevTestBed.game = DevTestBed.game or {
     active = false,
     mode = nil,
@@ -629,6 +831,10 @@ DevTestBed.game = DevTestBed.game or {
     winner = nil,
     locked = false,
     pulseState = false,
+    pulseIntervalMs = 1500,
+    pulseSequence = {},
+    pulseIndex = 0,
+    pulsePreviousFurnitureId = nil,
 }
 
 function DevTestBed.StopThresholdGame(clearWinner)
@@ -643,6 +849,10 @@ function DevTestBed.StopThresholdGame(clearWinner)
     DevTestBed.game.pulseState = false
     DevTestBed.game.pulseTeamKey = nil
     DevTestBed.game.pulseFurnitureLookup = {}
+    DevTestBed.game.pulseSequence = {}
+    DevTestBed.game.pulseIndex = 0
+    DevTestBed.game.pulsePreviousFurnitureId = nil
+    DevTestBed.game.pulseIntervalMs = 1500
 
     if clearWinner then
         DevTestBed.game.winner = nil
@@ -699,31 +909,47 @@ function DevTestBed.StartWinnerPulse(winnerKey)
 
     DevTestBed.game.pulseTeamKey = winnerKey
     DevTestBed.game.pulseFurnitureLookup = {}
-    DevTestBed.game.pulseState = false
+    DevTestBed.game.pulseSequence = {}
+    DevTestBed.game.pulseIndex = 0
+    DevTestBed.game.pulsePreviousFurnitureId = nil
+    DevTestBed.game.pulseIntervalMs = 1500
 
     for _, furnitureInfo in ipairs(entry.trackedFurnitureIds) do
         if furnitureInfo and furnitureInfo.furnitureId then
+            table.insert(DevTestBed.game.pulseSequence, furnitureInfo.furnitureId)
             DevTestBed.game.pulseFurnitureLookup[furnitureInfo.furnitureId] = true
         end
     end
 
-    EVENT_MANAGER:RegisterForUpdate(DevTestBed.name .. "WinnerPulse", 750, function()
+    if #DevTestBed.game.pulseSequence == 0 then
+        return
+    end
+
+    -- Pulse one item at a time instead of flashing the entire winning team at once.
+    -- This keeps state-change requests much lower and creates a sequential chase effect.
+    EVENT_MANAGER:RegisterForUpdate(DevTestBed.name .. "WinnerPulse", DevTestBed.game.pulseIntervalMs, function()
         local pulseEntry = DevTestBed.savedVars.items and DevTestBed.savedVars.items[winnerKey]
-        if not DevTestBed.game.locked or not pulseEntry or not pulseEntry.trackedFurnitureIds then
+        local sequence = DevTestBed.game.pulseSequence or {}
+
+        if not DevTestBed.game.locked or not pulseEntry or not pulseEntry.trackedFurnitureIds or #sequence == 0 then
             EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "WinnerPulse")
             return
         end
 
-        DevTestBed.game.pulseState = not DevTestBed.game.pulseState
-
         local winningState = tonumber(pulseEntry.state)
-        local pulseTargetState = DevTestBed.game.pulseState and winningState or DevTestBed.GetNonWinningState(winningState)
+        local nonWinningState = DevTestBed.GetNonWinningState(winningState)
 
-        for _, furnitureInfo in ipairs(pulseEntry.trackedFurnitureIds) do
-            local furnitureId = furnitureInfo and furnitureInfo.furnitureId
-            if furnitureId then
-                HousingEditorRequestChangeState(furnitureId, pulseTargetState)
-            end
+        -- Turn the previously highlighted item back off before lighting the next one.
+        if DevTestBed.game.pulsePreviousFurnitureId then
+            HousingEditorRequestChangeState(DevTestBed.game.pulsePreviousFurnitureId, nonWinningState)
+        end
+
+        DevTestBed.game.pulseIndex = (tonumber(DevTestBed.game.pulseIndex or 0) % #sequence) + 1
+
+        local furnitureId = sequence[DevTestBed.game.pulseIndex]
+        if furnitureId then
+            HousingEditorRequestChangeState(furnitureId, winningState)
+            DevTestBed.game.pulsePreviousFurnitureId = furnitureId
         end
     end)
 end
@@ -745,6 +971,7 @@ function DevTestBed.DeclareThresholdWinner(winnerKey, entry)
     DevTestBed.Print(message)
     DevTestBed.TryShowWinnerAnnouncement(zo_strformat("<<1>> wins!", winnerName))
     DevTestBed.TryPlayWinnerSound()
+    DevTestBed.RefreshGameStatusWindow()
     DevTestBed.StartWinnerPulse(winnerKey)
 end
 
@@ -789,6 +1016,7 @@ function DevTestBed.CheckThresholdGameState()
 
             if not DevTestBed.game.locked then
                 entry.currentWinCount = currentWinCount
+                DevTestBed.RefreshGameStatusWindow()
 
                 if currentWinCount >= tonumber(entry.requiredWinCount or DevTestBed.game.threshold or 0) then
                     DevTestBed.DeclareThresholdWinner(key, entry)
@@ -924,9 +1152,15 @@ function DevTestBed.StartThresholdMode(thresholdCount)
     DevTestBed.game.winnerKey = nil
     DevTestBed.game.locked = false
     DevTestBed.game.pulseFurnitureLookup = {}
+    DevTestBed.game.pulseSequence = {}
+    DevTestBed.game.pulseIndex = 0
+    DevTestBed.game.pulsePreviousFurnitureId = nil
+    DevTestBed.game.pulseIntervalMs = 1500
 
     EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "ThresholdWatcher")
     EVENT_MANAGER:RegisterForUpdate(DevTestBed.name .. "ThresholdWatcher", 250, DevTestBed.CheckThresholdGameState)
+
+    DevTestBed.ShowGameStatusWindow()
 
     DevTestBed.Print(zo_strformat(
         "Started threshold mode. Refreshed |c00FF00<<1>>|r team(s), tracking |c00FF00<<2>>|r item(s) per team. First team with |c00FF00<<3>>|r item(s) in the winning state wins.",
@@ -1083,6 +1317,11 @@ function DevTestBed.HandleSlashCommand(args)
         end
 
         DevTestBed.Print("Use: /dtb start threshold <count>")
+        return
+    end
+
+    if cmd == "window" then
+        DevTestBed.ToggleGameStatusWindow()
         return
     end
 
