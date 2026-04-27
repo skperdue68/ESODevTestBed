@@ -416,11 +416,17 @@ function DevTestBed.GetWarTeamTable()
 end
 
 function DevTestBed.GetActiveGameTeamTable()
-    if DevTestBed.game and DevTestBed.game.mode == "war" then
+    local mode = DevTestBed.game and DevTestBed.game.mode or nil
+
+    if mode == "war" then
         return DevTestBed.GetWarTeamTable()
     end
 
-    return DevTestBed.savedVars and DevTestBed.savedVars.items or {}
+    if mode == "threshold" or mode == "target" then
+        return DevTestBed.savedVars and DevTestBed.savedVars.items or {}
+    end
+
+    return {}
 end
 
 function DevTestBed.AddSelectedFurniture(name)
@@ -598,6 +604,34 @@ function DevTestBed.AddSelectedWarTeam(name)
 
     local warTeams = DevTestBed.GetWarTeamTable()
     local newKey = string.lower(name)
+
+    -- War mode supports only one furnishing type at a time.
+    -- Multiple War teams can share that furnishing type only when each team
+    -- uses a different win state. If the selected item type is different from
+    -- the currently defined War item type, clear the old War teams and start a
+    -- new War team set with this item.
+    local removedOldWarTeams = 0
+    local oldWarItemName = nil
+
+    for _, entry in pairs(warTeams) do
+        if entry and entry.furnitureDataId and tonumber(entry.furnitureDataId) ~= tonumber(furnitureDataId) then
+            removedOldWarTeams = removedOldWarTeams + 1
+            oldWarItemName = oldWarItemName or entry.itemName
+        end
+    end
+
+    if removedOldWarTeams > 0 then
+        DevTestBed.savedVars.warTeams = {}
+        warTeams = DevTestBed.GetWarTeamTable()
+
+        DevTestBed.Print(zo_strformat(
+            "War item changed from |cFFFF00<<1>>|r to |c00FF00<<2>>|r. Removed |cFFFF00<<3>>|r old War team(s).",
+            tostring(oldWarItemName or "Previous Item"),
+            tostring(itemName or "Unknown"),
+            tostring(removedOldWarTeams)
+        ))
+    end
+
     local sameItemTeamCount = 0
 
     for existingKey, entry in pairs(warTeams) do
@@ -897,12 +931,13 @@ function DevTestBed.SetupGameStatusRow(control, data)
         percent = math.floor((tonumber(data.currentCount or 0) / tonumber(data.requiredCount)) * 100)
     end
 
-    control:SetFont("ZoFontGame")
+    -- Use a bold font for the row so the highlighted Win State stands out.
+    -- ESO labels do not support true partial bold markup, so the win-state value
+    -- is also highlighted in yellow and the numeric state value is intentionally
+    -- not displayed.
+    control:SetFont("ZoFontGameBold")
     control:SetColor(1, 1, 1, 1)
     local winStateText = tostring(data.winStateName or "Unknown")
-    if data.winState ~= nil then
-        winStateText = winStateText .. " (" .. tostring(data.winState) .. ")"
-    end
 
     control:SetText(zo_strformat(
         "|c00FF00<<1>>|r - <<2>> - Win State: |cFFFF00<<3>>|r\n<<4>> / <<5>>  <<6>>%",
@@ -1037,8 +1072,21 @@ function DevTestBed.RefreshGameStatusWindow()
         dataList[i] = nil
     end
 
-    for key, entry in pairs(DevTestBed.GetActiveGameTeamTable()) do
-        if entry.trackedFurnitureIds or game.active then
+    local activeMode = game.mode
+    local activeTeamTable = DevTestBed.GetActiveGameTeamTable()
+
+    for key, entry in pairs(activeTeamTable) do
+        local includeRow = false
+
+        if activeMode == "war" then
+            -- War mode reads only savedVars.warTeams.
+            includeRow = entry.trackedFurnitureIds ~= nil or game.active == true
+        elseif activeMode == "threshold" or activeMode == "target" then
+            -- Threshold and Target read only savedVars.items.
+            includeRow = entry.trackedFurnitureIds ~= nil or game.active == true
+        end
+
+        if includeRow then
             table.insert(dataList, ZO_ScrollList_CreateDataEntry(
                 DevTestBed.GAME_STATUS_ROW_DATA_TYPE,
                 {
@@ -1407,7 +1455,7 @@ function DevTestBed.CreateControlWindow()
     local wm = WINDOW_MANAGER
 
     local window = wm:CreateTopLevelWindow("DevTestBedControlWindow")
-    window:SetDimensions(360, 390)
+    window:SetDimensions(460, 430)
     window:SetAnchor(TOPRIGHT, GuiRoot, TOPRIGHT, -40, 100)
     window:SetMouseEnabled(true)
     window:SetMovable(true)
@@ -1423,7 +1471,7 @@ function DevTestBed.CreateControlWindow()
     end
 
     if window.SetDimensionConstraints then
-        window:SetDimensionConstraints(320, 360, 620, 620)
+        window:SetDimensionConstraints(430, 400, 720, 700)
     end
 
     local backdrop = wm:CreateControl("$(parent)Backdrop", window, CT_BACKDROP)
@@ -1448,23 +1496,26 @@ function DevTestBed.CreateControlWindow()
         window:SetHidden(true)
     end)
 
+    local dropdownWidth = 250
+    local buttonWidth = 150
+
     local modeLabel = DevTestBed.CreateControlLabel(window, "$(parent)ModeLabel", "Game Mode", title, 16)
     local modeDropdown = wm:CreateControlFromVirtual("$(parent)ModeDropdown", window, "ZO_ComboBox")
-    modeDropdown:SetDimensions(180, 28)
+    modeDropdown:SetDimensions(dropdownWidth, 28)
     modeDropdown:SetAnchor(TOPLEFT, modeLabel, BOTTOMLEFT, 0, 4)
 
     local countLabel = DevTestBed.CreateControlLabel(window, "$(parent)CountLabel", "Required Count", modeDropdown, 14)
     local countDropdown = wm:CreateControlFromVirtual("$(parent)CountDropdown", window, "ZO_ComboBox")
-    countDropdown:SetDimensions(180, 28)
+    countDropdown:SetDimensions(dropdownWidth, 28)
     countDropdown:SetAnchor(TOPLEFT, countLabel, BOTTOMLEFT, 0, 4)
 
     local timeLabel = DevTestBed.CreateControlLabel(window, "$(parent)TimeLabel", "Time Limit", countDropdown, 14)
     local timeDropdown = wm:CreateControlFromVirtual("$(parent)TimeDropdown", window, "ZO_ComboBox")
-    timeDropdown:SetDimensions(180, 28)
+    timeDropdown:SetDimensions(dropdownWidth, 28)
     timeDropdown:SetAnchor(TOPLEFT, timeLabel, BOTTOMLEFT, 0, 4)
 
-    local startButton = DevTestBed.CreateControlButton(window, "$(parent)StartButton", "Start Game", 135, 32)
-    startButton:SetAnchor(TOPLEFT, timeDropdown, BOTTOMLEFT, 0, 18)
+    local startButton = DevTestBed.CreateControlButton(window, "$(parent)StartButton", "Start Game", buttonWidth, 32)
+    startButton:SetAnchor(TOPLEFT, modeDropdown, TOPRIGHT, 18, -2)
     startButton:SetHandler("OnClicked", function()
         local mode = DevTestBed.GetControlPanelSelectedMode()
         local count = DevTestBed.GetControlPanelSelectedCount()
@@ -1488,28 +1539,21 @@ function DevTestBed.CreateControlWindow()
         DevTestBed.RefreshControlWindow()
     end)
 
-    local resetButton = DevTestBed.CreateControlButton(window, "$(parent)ResetButton", "Reset Game", 135, 32)
-    resetButton:SetAnchor(LEFT, startButton, RIGHT, 16, 0)
+    local resetButton = DevTestBed.CreateControlButton(window, "$(parent)ResetButton", "Reset Game", buttonWidth, 32)
+    resetButton:SetAnchor(TOPLEFT, countDropdown, TOPRIGHT, 18, -2)
     resetButton:SetHandler("OnClicked", function()
         DevTestBed.ResetGame()
         DevTestBed.RefreshControlWindow()
     end)
 
-    local statusButton = DevTestBed.CreateControlButton(window, "$(parent)StatusButton", "Toggle Status", 135, 32)
-    statusButton:SetAnchor(TOPLEFT, startButton, BOTTOMLEFT, 0, 12)
+    local statusButton = DevTestBed.CreateControlButton(window, "$(parent)StatusButton", "Toggle Status", buttonWidth, 32)
+    statusButton:SetAnchor(TOPLEFT, timeDropdown, TOPRIGHT, 18, -2)
     statusButton:SetHandler("OnClicked", function()
         DevTestBed.ToggleGameStatusWindow()
         DevTestBed.RefreshControlWindow()
     end)
 
-    local refreshButton = DevTestBed.CreateControlButton(window, "$(parent)RefreshButton", "Refresh Counts", 135, 32)
-    refreshButton:SetAnchor(LEFT, statusButton, RIGHT, 16, 0)
-    refreshButton:SetHandler("OnClicked", function()
-        DevTestBed.PopulateControlCountDropdown()
-        DevTestBed.RefreshControlWindow()
-    end)
-
-    local currentTitle = DevTestBed.CreateControlLabel(window, "$(parent)CurrentTitle", "Current Game", statusButton, 18)
+    local currentTitle = DevTestBed.CreateControlLabel(window, "$(parent)CurrentTitle", "Current Game", timeDropdown, 24)
 
     local currentInfo = wm:CreateControl("$(parent)CurrentInfo", window, CT_LABEL)
     currentInfo:SetAnchor(TOPLEFT, currentTitle, BOTTOMLEFT, 0, 6)
@@ -1528,7 +1572,7 @@ function DevTestBed.CreateControlWindow()
     DevTestBed.ui.controlStartButton = startButton
     DevTestBed.ui.controlResetButton = resetButton
     DevTestBed.ui.controlStatusButton = statusButton
-    DevTestBed.ui.controlRefreshButton = refreshButton
+    DevTestBed.ui.controlRefreshButton = nil
     DevTestBed.ui.controlCurrentInfo = currentInfo
 
     DevTestBed.PopulateControlModeDropdown()
@@ -1578,9 +1622,8 @@ function DevTestBed.RefreshControlWindow()
         end
 
         DevTestBed.ui.controlCurrentInfo:SetText(zo_strformat(
-            "<<1>>Selected: <<2>>\nMode: <<3>>\nTimer: <<4>>\nStatus: <<5>>",
+            "<<1>>Mode: <<2>>\nTimer: <<3>>\nStatus: <<4>>",
             countText,
-            DevTestBed.TitleCaseFirst(mode),
             tostring(modeText),
             timerText ~= "" and timerText or "None",
             tostring(statusText)
