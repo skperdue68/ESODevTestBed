@@ -437,8 +437,8 @@ function DevTestBed.AddSelectedFurniture(name)
         local displayIndex = currentState + 1
 
         -- Attempt to retrieve a readable state name from the API
-        -- NOTE: Uses furnitureDataId (type-level), not furnitureId (instance-level)
-        stateName = GetPlacedFurniturePreviewVariationDisplayName(furniture Id, displayIndex)
+        -- NOTE: Uses furnitureId (instance-level), not furnitureDataId (item-level)
+        stateName = GetPlacedFurniturePreviewVariationDisplayName(furnitureId, displayIndex)
             or ("State " .. tostring(currentState))
 
         -- Debug output for verification
