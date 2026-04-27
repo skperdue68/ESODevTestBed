@@ -25,6 +25,10 @@ function DevTestBed.ShowHelp()
     DevTestBed.Print("/dtb ping  - Confirm the add-on is loaded")
     DevTestBed.Print("/dtb count - Count all placed furnishings in the current house")
     DevTestBed.Print("/dtb list  - List placed furnishings with furnitureId and furnitureDataId")
+    DevTestBed.Print("/dtb teams - List created teams and assigned items / state")
+    DevTestBed.Print("/dtb add <name> - Creates a team with the selected Item in its current state")
+    DevTestBed.Print("/dtb delete <name> - Delete a team")
+    DevTestBed.Print("/dtb deleteall - Delete all teams")
 end
 
 
@@ -271,7 +275,49 @@ end
 
 
 
+--[[
+    DevTestBed.GetMatchingHouseFurniture
 
+    Scans all placed furnishings in the current house and returns every
+    furnishing instance that matches the provided furnitureDataId.
+
+    Parameters:
+        targetFurnitureDataId (number)
+            The shared furnitureDataId to search for
+
+    Returns:
+        table, number
+            matches - table of matching placed furniture instances
+            count   - number of matches found
+]]
+function DevTestBed.GetMatchingHouseFurniture(targetFurnitureDataId)
+
+    local matches = {}
+    local count = 0
+    local previousFurnitureId = nil
+
+    while true do
+        local furnitureId = GetNextPlacedHousingFurnitureId(previousFurnitureId)
+
+        if not furnitureId or furnitureId == 0 then
+            break
+        end
+
+        local itemName, _, furnitureDataId = GetPlacedHousingFurnitureInfo(furnitureId)
+
+        if tonumber(furnitureDataId) == tonumber(targetFurnitureDataId) then
+            count = count + 1
+
+            matches[count] = {
+                furnitureId = furnitureId,
+            }
+        end
+
+        previousFurnitureId = furnitureId
+    end
+
+    return matches, count
+end
 
 
 
@@ -392,14 +438,14 @@ function DevTestBed.AddSelectedFurniture(name)
 
         -- Attempt to retrieve a readable state name from the API
         -- NOTE: Uses furnitureDataId (type-level), not furnitureId (instance-level)
-        stateName = GetPlacedFurniturePreviewVariationDisplayName(furnitureDataId, displayIndex)
+        stateName = GetPlacedFurniturePreviewVariationDisplayName(furniture Id, displayIndex)
             or ("State " .. tostring(currentState))
 
         -- Debug output for verification
-        DevTestBed.Print("furnitureDataId: " .. tostring(furnitureDataId))
-        DevTestBed.Print("currentState: " .. tostring(currentState))
-        DevTestBed.Print("displayIndex: " .. tostring(displayIndex))
-        DevTestBed.Print("stateName: " .. tostring(stateName))
+        DevTestBed.Dbg("furnitureDataId: " .. tostring(furnitureDataId))
+        DevTestBed.Dbg("currentState: " .. tostring(currentState))
+        DevTestBed.Dbg("displayIndex: " .. tostring(displayIndex))
+        DevTestBed.Dbg("stateName: " .. tostring(stateName))
     else
         -- Fallback if API function is unavailable
         stateName = "State " .. tostring(currentState)
@@ -420,28 +466,159 @@ function DevTestBed.AddSelectedFurniture(name)
         end
     end
 
+    -- Scan the house for all placed furnishings with this same furnitureDataId
+    local matchingFurniture, matchingCount = DevTestBed.GetMatchingHouseFurniture(furnitureDataId)
+
     -- Save or overwrite the entry for this team/name
     DevTestBed.savedVars.items[newKey] = {
         name = name,                         -- User-defined label
         itemName = itemName,                 -- ESO display name
-        furnitureDataId = furnitureDataId,   -- Type identifier (used for matching all instances)
-        state = currentState,                -- Actual state value (0-based)
-        stateName = stateName,               -- Human-readable state label
+        furnitureDataId = furnitureDataId,   -- Type identifier
+        state = currentState,                -- Winning state value
+        stateName = stateName,               -- Winning state display label
+        matchingCount = matchingCount,       -- Number of matching placed items
+        furnitureIds = matchingFurniture,    -- Sub-table of matching placed furnitureIds
     }
 
     -- Confirmation output to chat
     DevTestBed.Print(zo_strformat(
-        "Saved |c00FF00<<1>>|r as |c00FF00<<2>>|r - State |c00FF00<<3>>",
+        "Saved |c00FF00<<1>>|r as |c00FF00<<2>>|r - State |c00FF00<<3>>|r - Found |c00FF00<<4>>|r matching item(s)",
         tostring(name),
         tostring(itemName),
-        tostring(stateName)
+        tostring(stateName),
+        tostring(matchingCount)
     ))
 end
 
 
 
+--[[
+    DevTestBed.ListTeams
+
+    Lists all saved team/item assignments.
+
+    For each saved team, this prints:
+        - Team name
+        - Assigned furnishing name
+        - Winning state name
+        - Number of matching placed furnishings
+
+    Returns:
+        nil
+]]
+function DevTestBed.ListTeams()
+
+    DevTestBed.savedVars.items = DevTestBed.savedVars.items or {}
+
+    local count = 0
+
+    for key, entry in pairs(DevTestBed.savedVars.items) do
+        count = count + 1
+
+        DevTestBed.Print(zo_strformat(
+            "Team: |c00FF00<<1>>|r - Item: |c00FF00<<2>>|r - State: |c00FF00<<3>>|r - Matching: |c00FF00<<4>>|r",
+            tostring(entry.name or key),
+            tostring(entry.itemName or "Unknown"),
+            tostring(entry.stateName or "Unknown"),
+            tostring(entry.matchingCount or 0)
+        ))
+    end
+
+    if count == 0 then
+        DevTestBed.Print("No teams have been created.")
+        return
+    end
+
+    DevTestBed.Print("Listed " .. tostring(count) .. " team(s).")
+end
 
 
+--[[
+    DevTestBed.DeleteTeam
+
+    Removes a saved team assignment by name.
+
+    Parameters:
+        name (string)
+            The name of the team to delete
+
+    Returns:
+        nil
+
+    Behavior:
+        - Normalizes the provided name (trim + lowercase key)
+        - Checks if the team exists
+        - Deletes the team if found
+        - Prints confirmation or error message
+
+    Example:
+        /dtb delete TeamAlpha
+]]
+function DevTestBed.DeleteTeam(name)
+
+    -- Normalize and trim input
+    name = tostring(name or ""):match("^%s*(.-)%s*$")
+
+    if name == "" then
+        DevTestBed.Print("Use: /dtb delete <name>")
+        return
+    end
+
+    DevTestBed.savedVars.items = DevTestBed.savedVars.items or {}
+
+    local key = string.lower(name)
+    local entry = DevTestBed.savedVars.items[key]
+
+    if not entry then
+        DevTestBed.Print("No team found with name: " .. tostring(name))
+        return
+    end
+
+    -- Remove the team
+    DevTestBed.savedVars.items[key] = nil
+
+    DevTestBed.Print(zo_strformat(
+        "Deleted team |c00FF00<<1>>|r (Item: |c00FF00<<2>>|r)",
+        tostring(entry.name or name),
+        tostring(entry.itemName or "Unknown")
+    ))
+end
+
+
+--[[
+    DevTestBed.DeleteAllTeams
+
+    Removes ALL saved team assignments.
+
+    Returns:
+        nil
+
+    Behavior:
+        - Clears the entire items table in SavedVariables
+        - Prints how many teams were removed
+        - Safe to call even if no teams exist
+
+    Example:
+        /dtb deleteall
+]]
+function DevTestBed.DeleteAllTeams()
+
+    DevTestBed.savedVars.items = DevTestBed.savedVars.items or {}
+
+    local count = 0
+    for _ in pairs(DevTestBed.savedVars.items) do
+        count = count + 1
+    end
+
+    -- Clear all teams
+    DevTestBed.savedVars.items = {}
+
+    if count == 0 then
+        DevTestBed.Print("No teams to delete.")
+    else
+        DevTestBed.Print("Deleted " .. tostring(count) .. " team(s).")
+    end
+end
 
 
 function DevTestBed.HandleSlashCommand(args)
@@ -468,8 +645,24 @@ function DevTestBed.HandleSlashCommand(args)
         return
     end
 
+    if cmd == "teams" then
+        DevTestBed.ListTeams()
+        return
+    end
+
     if cmd == "add" then
         DevTestBed.AddSelectedFurniture(rest)
+        return
+    end
+
+    if cmd == "delete" then
+        DevTestBed.DeleteTeam(rest)
+        return
+    end
+
+
+    if cmd == "deleteall" then
+        DevTestBed.DeleteAllTeams()
         return
     end
 
