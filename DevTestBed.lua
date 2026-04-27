@@ -29,6 +29,7 @@ function DevTestBed.ShowHelp()
     DevTestBed.Print("/dtb add <name> - Creates a team with the selected Item in its current state")
     DevTestBed.Print("/dtb delete <name> - Delete a team")
     DevTestBed.Print("/dtb deleteall - Delete all teams")
+    DevTestBed.Print("/dtb start - Rescan team items and place them in their non-winning state")
 end
 
 
@@ -621,6 +622,126 @@ function DevTestBed.DeleteAllTeams()
 end
 
 
+
+--[[
+    DevTestBed.Start
+
+    Starts the team setup by:
+        1. Rescanning the house for each team's furnitureDataId
+        2. Saving the current matching furnitureIds
+        3. Confirming all teams have the same number of matching items
+        4. Setting all matching items to the non-winning state
+
+    If team item counts do not match, processing stops.
+]]
+function DevTestBed.Start()
+
+    if not DevTestBed.IsInHouse(true) then return end
+
+    if not HasAnyEditingPermissionsForCurrentHouse() then
+        DevTestBed.Print("You must have housing editor permissions to use this command.")
+        return
+    end
+
+    DevTestBed.savedVars.items = DevTestBed.savedVars.items or {}
+
+    local teamCount = 0
+    local expectedMatchCount = nil
+    local countsAreEqual = true
+
+    -- First pass:
+    -- Rescan every team and update saved matching furniture data.
+    for key, entry in pairs(DevTestBed.savedVars.items) do
+        teamCount = teamCount + 1
+
+        local furnitureDataId = entry.furnitureDataId
+
+        if furnitureDataId then
+            local matchingFurniture, matchingCount = DevTestBed.GetMatchingHouseFurniture(furnitureDataId)
+
+            entry.furnitureIds = matchingFurniture
+            entry.matchingCount = matchingCount
+
+            if expectedMatchCount == nil then
+                expectedMatchCount = matchingCount
+            elseif matchingCount ~= expectedMatchCount then
+                countsAreEqual = false
+            end
+        else
+            entry.furnitureIds = {}
+            entry.matchingCount = 0
+            countsAreEqual = false
+        end
+    end
+
+    if teamCount == 0 then
+        DevTestBed.Print("No teams have been created.")
+        return
+    end
+
+    -- Stop if not all teams have the same number of matching items.
+    if not countsAreEqual then
+        DevTestBed.Print("|cFF0000Item counts are not equal. Start cancelled.|r")
+
+        for key, entry in pairs(DevTestBed.savedVars.items) do
+            DevTestBed.Print(zo_strformat(
+                "Team: |c00FF00<<1>>|r - Item: |c00FF00<<2>>|r - Matching Count: |cFFFF00<<3>>|r",
+                tostring(entry.name or key),
+                tostring(entry.itemName or "Unknown"),
+                tostring(entry.matchingCount or 0)
+            ))
+        end
+
+        return
+    end
+
+    local changedCount = 0
+
+    -- Second pass:
+    -- Only now that counts are valid, set all items to non-winning state.
+    for key, entry in pairs(DevTestBed.savedVars.items) do
+        local winningState = tonumber(entry.state)
+
+        if winningState ~= nil and entry.furnitureIds then
+            local nonWinningState = winningState == 0 and 1 or 0
+
+            for _, furnitureInfo in ipairs(entry.furnitureIds) do
+                local furnitureId = furnitureInfo.furnitureId
+
+                if furnitureId then
+                    local numStates = GetPlacedHousingFurnitureNumObjectStates(furnitureId)
+
+                    if numStates == 2 then
+                        local currentState = GetPlacedHousingFurnitureCurrentObjectStateIndex(furnitureId)
+
+                        if tonumber(currentState) ~= tonumber(nonWinningState) then
+                            local result = HousingEditorRequestChangeState(furnitureId, nonWinningState)
+
+                            DevTestBed.Dbg(zo_strformat(
+                                "Team <<1>> furnitureId <<2>> set to state <<3>> result <<4>>",
+                                tostring(entry.name or key),
+                                tostring(furnitureId),
+                                tostring(nonWinningState),
+                                tostring(result)
+                            ))
+
+                            changedCount = changedCount + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    DevTestBed.Print(zo_strformat(
+        "Started game setup. Refreshed |c00FF00<<1>>|r team(s), verified |c00FF00<<2>>|r matching item(s) per team, and placed |c00FF00<<3>>|r item(s) into their non-winning state.",
+        tostring(teamCount),
+        tostring(expectedMatchCount or 0),
+        tostring(changedCount)
+    ))
+end
+
+
 function DevTestBed.HandleSlashCommand(args)
     local cmd, rest = string.match(args or "", "^%s*(%S*)%s*(.-)%s*$")
     cmd = string.lower(cmd or "")
@@ -663,6 +784,11 @@ function DevTestBed.HandleSlashCommand(args)
 
     if cmd == "deleteall" then
         DevTestBed.DeleteAllTeams()
+        return
+    end
+
+    if cmd == "start" then
+        DevTestBed.Start()
         return
     end
 
