@@ -29,7 +29,7 @@ function DevTestBed.ShowHelp()
     DevTestBed.Print("/dtb add <name> - Creates a team with the selected Item in its current state")
     DevTestBed.Print("/dtb delete <name> - Delete a team")
     DevTestBed.Print("/dtb deleteall - Delete all teams")
-    DevTestBed.Print("/dtb start - Rescan team items and place them in their non-winning state")
+    DevTestBed.Print("/dtb start threshold <count> - Reset all team items to non-winning state, then track all team items and win when count are in the winning state")
 end
 
 
@@ -622,6 +622,324 @@ function DevTestBed.DeleteAllTeams()
 end
 
 
+DevTestBed.game = DevTestBed.game or {
+    active = false,
+    mode = nil,
+    threshold = 0,
+    winner = nil,
+    locked = false,
+    pulseState = false,
+}
+
+function DevTestBed.StopThresholdGame(clearWinner)
+    EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "ThresholdWatcher")
+    EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "WinnerPulse")
+
+    DevTestBed.game = DevTestBed.game or {}
+    DevTestBed.game.active = false
+    DevTestBed.game.mode = nil
+    DevTestBed.game.threshold = 0
+    DevTestBed.game.locked = false
+    DevTestBed.game.pulseState = false
+    DevTestBed.game.pulseTeamKey = nil
+    DevTestBed.game.pulseFurnitureLookup = {}
+
+    if clearWinner then
+        DevTestBed.game.winner = nil
+        DevTestBed.game.winnerKey = nil
+    end
+end
+
+function DevTestBed.ShowThresholdCountMismatch()
+    DevTestBed.Print("|cFF0000Item counts are not equal. Start cancelled.|r")
+
+    for key, entry in pairs(DevTestBed.savedVars.items or {}) do
+        DevTestBed.Print(zo_strformat(
+            "Team: |c00FF00<<1>>|r - Item: |c00FF00<<2>>|r - Matching Count: |cFFFF00<<3>>|r",
+            tostring(entry.name or key),
+            tostring(entry.itemName or "Unknown"),
+            tostring(entry.matchingCount or 0)
+        ))
+    end
+end
+
+function DevTestBed.GetNonWinningState(winningState)
+    winningState = tonumber(winningState)
+
+    if winningState == 0 then
+        return 1
+    end
+
+    return 0
+end
+
+function DevTestBed.TryShowWinnerAnnouncement(message)
+    if CENTER_SCREEN_ANNOUNCE and CENTER_SCREEN_ANNOUNCE.AddMessage then
+        pcall(function()
+            CENTER_SCREEN_ANNOUNCE:AddMessage(EVENT_DISPLAY_ANNOUNCEMENT, CSA_EVENT_SMALL_TEXT, nil, message)
+        end)
+    end
+end
+
+function DevTestBed.TryPlayWinnerSound()
+    if type(PlaySound) == "function" and type(SOUNDS) == "table" then
+        pcall(function()
+            PlaySound(SOUNDS.DUEL_WON or SOUNDS.QUEST_COMPLETE or SOUNDS.OBJECTIVE_COMPLETE)
+        end)
+    end
+end
+
+function DevTestBed.StartWinnerPulse(winnerKey)
+    EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "WinnerPulse")
+
+    local entry = DevTestBed.savedVars.items and DevTestBed.savedVars.items[winnerKey]
+    if not entry or not entry.trackedFurnitureIds then
+        return
+    end
+
+    DevTestBed.game.pulseTeamKey = winnerKey
+    DevTestBed.game.pulseFurnitureLookup = {}
+    DevTestBed.game.pulseState = false
+
+    for _, furnitureInfo in ipairs(entry.trackedFurnitureIds) do
+        if furnitureInfo and furnitureInfo.furnitureId then
+            DevTestBed.game.pulseFurnitureLookup[furnitureInfo.furnitureId] = true
+        end
+    end
+
+    EVENT_MANAGER:RegisterForUpdate(DevTestBed.name .. "WinnerPulse", 750, function()
+        local pulseEntry = DevTestBed.savedVars.items and DevTestBed.savedVars.items[winnerKey]
+        if not DevTestBed.game.locked or not pulseEntry or not pulseEntry.trackedFurnitureIds then
+            EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "WinnerPulse")
+            return
+        end
+
+        DevTestBed.game.pulseState = not DevTestBed.game.pulseState
+
+        local winningState = tonumber(pulseEntry.state)
+        local pulseTargetState = DevTestBed.game.pulseState and winningState or DevTestBed.GetNonWinningState(winningState)
+
+        for _, furnitureInfo in ipairs(pulseEntry.trackedFurnitureIds) do
+            local furnitureId = furnitureInfo and furnitureInfo.furnitureId
+            if furnitureId then
+                HousingEditorRequestChangeState(furnitureId, pulseTargetState)
+            end
+        end
+    end)
+end
+
+function DevTestBed.DeclareThresholdWinner(winnerKey, entry)
+    if DevTestBed.game.locked then
+        return
+    end
+
+    local winnerName = tostring(entry.name or winnerKey)
+
+    DevTestBed.game.winner = winnerName
+    DevTestBed.game.winnerKey = winnerKey
+    DevTestBed.game.locked = true
+    DevTestBed.game.active = true
+
+    local message = zo_strformat("|c00FF00<<1>> wins!|r", winnerName)
+
+    DevTestBed.Print(message)
+    DevTestBed.TryShowWinnerAnnouncement(zo_strformat("<<1>> wins!", winnerName))
+    DevTestBed.TryPlayWinnerSound()
+    DevTestBed.StartWinnerPulse(winnerKey)
+end
+
+function DevTestBed.CheckThresholdGameState()
+    if not DevTestBed.game or not DevTestBed.game.active or DevTestBed.game.mode ~= "threshold" then
+        EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "ThresholdWatcher")
+        return
+    end
+
+    local pulseLookup = DevTestBed.game.pulseFurnitureLookup or {}
+
+    for key, entry in pairs(DevTestBed.savedVars.items or {}) do
+        if entry.trackedFurnitureIds and entry.lastStates then
+            local winningState = tonumber(entry.state)
+            local currentWinCount = 0
+
+            for _, furnitureInfo in ipairs(entry.trackedFurnitureIds) do
+                local furnitureId = furnitureInfo and furnitureInfo.furnitureId
+
+                if furnitureId then
+                    local currentState = GetPlacedHousingFurnitureCurrentObjectStateIndex(furnitureId)
+                    local previousState = entry.lastStates[furnitureId]
+
+                    if currentState ~= nil then
+                        currentState = tonumber(currentState)
+
+                        if DevTestBed.game.locked then
+                            if not pulseLookup[furnitureId] and previousState ~= nil and tonumber(previousState) ~= currentState then
+                                HousingEditorRequestChangeState(furnitureId, previousState)
+                                currentState = tonumber(previousState)
+                            end
+                        else
+                            entry.lastStates[furnitureId] = currentState
+                        end
+
+                        if currentState == winningState then
+                            currentWinCount = currentWinCount + 1
+                        end
+                    end
+                end
+            end
+
+            if not DevTestBed.game.locked then
+                entry.currentWinCount = currentWinCount
+
+                if currentWinCount >= tonumber(entry.requiredWinCount or DevTestBed.game.threshold or 0) then
+                    DevTestBed.DeclareThresholdWinner(key, entry)
+                    return
+                end
+            end
+        end
+    end
+end
+
+--[[
+    DevTestBed.StartThresholdMode
+
+    Starts threshold mode.
+
+    Usage:
+        /dtb start threshold <count>
+
+    Rules:
+        - Rescans matching items for every team
+        - Requires all teams to have the same number of matching items
+        - count must be at least 1
+        - count cannot exceed the matching item count
+        - All matching items are tracked
+        - A team wins when count tracked items are in that team's saved winning state
+]]
+function DevTestBed.StartThresholdMode(thresholdCount)
+    if not DevTestBed.IsInHouse(true) then return end
+
+    if not HasAnyEditingPermissionsForCurrentHouse() then
+        DevTestBed.Print("You must have housing editor permissions to use this command.")
+        return
+    end
+
+    thresholdCount = tonumber(thresholdCount)
+
+    if not thresholdCount or thresholdCount < 1 or thresholdCount ~= math.floor(thresholdCount) then
+        DevTestBed.Print("Use: /dtb start threshold <count>")
+        DevTestBed.Print("Count must be a whole number of at least 1.")
+        return
+    end
+
+    DevTestBed.savedVars.items = DevTestBed.savedVars.items or {}
+
+    local teamCount = 0
+    local expectedMatchCount = nil
+    local countsAreEqual = true
+
+    -- Stop any prior threshold watcher/pulse before starting a new game.
+    DevTestBed.StopThresholdGame(true)
+
+    for key, entry in pairs(DevTestBed.savedVars.items) do
+        teamCount = teamCount + 1
+
+        local furnitureDataId = entry.furnitureDataId
+
+        if furnitureDataId then
+            local matchingFurniture, matchingCount = DevTestBed.GetMatchingHouseFurniture(furnitureDataId)
+
+            entry.furnitureIds = matchingFurniture
+            entry.trackedFurnitureIds = matchingFurniture
+            entry.matchingCount = matchingCount
+            entry.requiredWinCount = thresholdCount
+            entry.currentWinCount = 0
+            entry.lastStates = {}
+
+            if expectedMatchCount == nil then
+                expectedMatchCount = matchingCount
+            elseif matchingCount ~= expectedMatchCount then
+                countsAreEqual = false
+            end
+        else
+            entry.furnitureIds = {}
+            entry.trackedFurnitureIds = {}
+            entry.matchingCount = 0
+            entry.requiredWinCount = thresholdCount
+            entry.currentWinCount = 0
+            entry.lastStates = {}
+            countsAreEqual = false
+        end
+    end
+
+    if teamCount == 0 then
+        DevTestBed.Print("No teams have been created.")
+        return
+    end
+
+    if not countsAreEqual then
+        DevTestBed.ShowThresholdCountMismatch()
+        return
+    end
+
+    expectedMatchCount = tonumber(expectedMatchCount or 0)
+
+    if thresholdCount > expectedMatchCount then
+        DevTestBed.Print(zo_strformat(
+            "Threshold mode cancelled. Count must be between 1 and <<1>>.",
+            tostring(expectedMatchCount)
+        ))
+        return
+    end
+
+    local changedCount = 0
+
+    for key, entry in pairs(DevTestBed.savedVars.items) do
+        local winningState = tonumber(entry.state)
+        local nonWinningState = DevTestBed.GetNonWinningState(winningState)
+
+        for _, furnitureInfo in ipairs(entry.trackedFurnitureIds or {}) do
+            local furnitureId = furnitureInfo and furnitureInfo.furnitureId
+
+            if furnitureId then
+                local numStates = GetPlacedHousingFurnitureNumObjectStates(furnitureId)
+
+                if numStates == 2 then
+                    local currentState = GetPlacedHousingFurnitureCurrentObjectStateIndex(furnitureId)
+
+                    if tonumber(currentState) ~= tonumber(nonWinningState) then
+                        HousingEditorRequestChangeState(furnitureId, nonWinningState)
+                        changedCount = changedCount + 1
+                    end
+
+                    entry.lastStates[furnitureId] = nonWinningState
+                end
+            end
+        end
+    end
+
+    DevTestBed.game.active = true
+    DevTestBed.game.mode = "threshold"
+    DevTestBed.game.threshold = thresholdCount
+    DevTestBed.game.winner = nil
+    DevTestBed.game.winnerKey = nil
+    DevTestBed.game.locked = false
+    DevTestBed.game.pulseFurnitureLookup = {}
+
+    EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "ThresholdWatcher")
+    EVENT_MANAGER:RegisterForUpdate(DevTestBed.name .. "ThresholdWatcher", 250, DevTestBed.CheckThresholdGameState)
+
+    DevTestBed.Print(zo_strformat(
+        "Started threshold mode. Refreshed |c00FF00<<1>>|r team(s), tracking |c00FF00<<2>>|r item(s) per team. First team with |c00FF00<<3>>|r item(s) in the winning state wins.",
+        tostring(teamCount),
+        tostring(expectedMatchCount),
+        tostring(thresholdCount)
+    ))
+
+    if changedCount > 0 then
+        DevTestBed.Dbg("Placed " .. tostring(changedCount) .. " item(s) into their non-winning state.")
+    end
+end
+
 
 --[[
     DevTestBed.Start
@@ -629,12 +947,11 @@ end
     Starts the team setup by:
         1. Rescanning the house for each team's furnitureDataId
         2. Saving the current matching furnitureIds
-        3. Confirming all teams have the same number of matching items
-        4. Setting all matching items to the non-winning state
-
-    If team item counts do not match, processing stops.
+        3. Setting all matching items to the non-winning state
 ]]
 function DevTestBed.Start()
+
+    DevTestBed.StopThresholdGame(true)
 
     if not DevTestBed.IsInHouse(true) then return end
 
@@ -646,66 +963,27 @@ function DevTestBed.Start()
     DevTestBed.savedVars.items = DevTestBed.savedVars.items or {}
 
     local teamCount = 0
-    local expectedMatchCount = nil
-    local countsAreEqual = true
+    local changedCount = 0
 
-    -- First pass:
-    -- Rescan every team and update saved matching furniture data.
     for key, entry in pairs(DevTestBed.savedVars.items) do
         teamCount = teamCount + 1
 
         local furnitureDataId = entry.furnitureDataId
+        local winningState = tonumber(entry.state)
 
-        if furnitureDataId then
+        if furnitureDataId and winningState ~= nil then
+            -- Refresh matching furniture list for this team
             local matchingFurniture, matchingCount = DevTestBed.GetMatchingHouseFurniture(furnitureDataId)
 
             entry.furnitureIds = matchingFurniture
             entry.matchingCount = matchingCount
 
-            if expectedMatchCount == nil then
-                expectedMatchCount = matchingCount
-            elseif matchingCount ~= expectedMatchCount then
-                countsAreEqual = false
-            end
-        else
-            entry.furnitureIds = {}
-            entry.matchingCount = 0
-            countsAreEqual = false
-        end
-    end
-
-    if teamCount == 0 then
-        DevTestBed.Print("No teams have been created.")
-        return
-    end
-
-    -- Stop if not all teams have the same number of matching items.
-    if not countsAreEqual then
-        DevTestBed.Print("|cFF0000Item counts are not equal. Start cancelled.|r")
-
-        for key, entry in pairs(DevTestBed.savedVars.items) do
-            DevTestBed.Print(zo_strformat(
-                "Team: |c00FF00<<1>>|r - Item: |c00FF00<<2>>|r - Matching Count: |cFFFF00<<3>>|r",
-                tostring(entry.name or key),
-                tostring(entry.itemName or "Unknown"),
-                tostring(entry.matchingCount or 0)
-            ))
-        end
-
-        return
-    end
-
-    local changedCount = 0
-
-    -- Second pass:
-    -- Only now that counts are valid, set all items to non-winning state.
-    for key, entry in pairs(DevTestBed.savedVars.items) do
-        local winningState = tonumber(entry.state)
-
-        if winningState ~= nil and entry.furnitureIds then
+            -- Since this command only supports 2-state objects:
+            -- if winning state is 0, non-winning is 1
+            -- if winning state is 1, non-winning is 0
             local nonWinningState = winningState == 0 and 1 or 0
 
-            for _, furnitureInfo in ipairs(entry.furnitureIds) do
+            for _, furnitureInfo in ipairs(matchingFurniture) do
                 local furnitureId = furnitureInfo.furnitureId
 
                 if furnitureId then
@@ -733,10 +1011,14 @@ function DevTestBed.Start()
         end
     end
 
+    if teamCount == 0 then
+        DevTestBed.Print("No teams have been created.")
+        return
+    end
+
     DevTestBed.Print(zo_strformat(
-        "Started game setup. Refreshed |c00FF00<<1>>|r team(s), verified |c00FF00<<2>>|r matching item(s) per team, and placed |c00FF00<<3>>|r item(s) into their non-winning state.",
+        "Started game setup. Refreshed |c00FF00<<1>>|r team(s) and placed |c00FF00<<2>>|r item(s) into their non-winning state.",
         tostring(teamCount),
-        tostring(expectedMatchCount or 0),
         tostring(changedCount)
     ))
 end
@@ -788,7 +1070,19 @@ function DevTestBed.HandleSlashCommand(args)
     end
 
     if cmd == "start" then
-        DevTestBed.Start()
+        local mode, countText = string.match(rest or "", "^(%S*)%s*(.-)$")
+        mode = string.lower(mode or "")
+
+        if mode == "threshold" then
+            DevTestBed.StartThresholdMode(countText)
+            return
+        end
+
+        if mode ~= "" then
+            DevTestBed.Print("Unknown start mode: " .. tostring(mode))
+        end
+
+        DevTestBed.Print("Use: /dtb start threshold <count>")
         return
     end
 
