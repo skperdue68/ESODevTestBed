@@ -31,6 +31,7 @@ function DevTestBed.ShowHelp()
     DevTestBed.Print("/dtb deleteall - Delete all teams")
     DevTestBed.Print("/dtb start threshold <count> [minutes] - Start threshold mode. Optional minutes must be 1-60 and enables timed/overtime scoring")
     DevTestBed.Print("/dtb start target <count> [minutes] - Start target mode. Randomly chooses count monitored items per team; optional minutes works like threshold")
+    DevTestBed.Print("/dtb reset - Stop the active game and set all team items to their non-winning state")
     DevTestBed.Print("/dtb window - Toggle the game status window")
 end
 
@@ -641,7 +642,7 @@ end
 DevTestBed.ui = DevTestBed.ui or {}
 
 DevTestBed.GAME_STATUS_ROW_DATA_TYPE = 1
-DevTestBed.GAME_STATUS_ROW_HEIGHT = 58
+DevTestBed.GAME_STATUS_ROW_HEIGHT = 68
 
 function DevTestBed.SetupGameStatusRow(control, data)
     if not control or not data then return end
@@ -653,10 +654,16 @@ function DevTestBed.SetupGameStatusRow(control, data)
 
     control:SetFont("ZoFontGame")
     control:SetColor(1, 1, 1, 1)
+    local winStateText = tostring(data.winStateName or "Unknown")
+    if data.winState ~= nil then
+        winStateText = winStateText .. " (" .. tostring(data.winState) .. ")"
+    end
+
     control:SetText(zo_strformat(
-        "|c00FF00<<1>>|r - <<2>>\n<<3>> / <<4>>  <<5>>%",
+        "|c00FF00<<1>>|r - <<2>> - Win State: |cFFFF00<<3>>|r\n<<4>> / <<5>>  <<6>>%",
         tostring(data.teamName or "Unknown"),
         tostring(data.itemName or "Unknown"),
+        winStateText,
         tostring(data.currentCount or 0),
         tostring(data.requiredCount or 0),
         tostring(percent)
@@ -792,6 +799,8 @@ function DevTestBed.RefreshGameStatusWindow()
                 {
                     teamName = entry.name or key,
                     itemName = entry.itemName or "Unknown",
+                    winState = entry.state,
+                    winStateName = entry.stateName or "Unknown",
                     currentCount = entry.currentWinCount or 0,
                     requiredCount = entry.requiredWinCount or game.threshold or 0,
                 }
@@ -1000,171 +1009,6 @@ function DevTestBed.TryPlayWinnerSound()
     end
 end
 
-function DevTestBed.SeedRandomOnce()
-    if DevTestBed.randomSeeded then
-        return
-    end
-
-    local seed = 0
-
-    if type(GetTimeStamp) == "function" then
-        seed = seed + tonumber(GetTimeStamp())
-    elseif os and type(os.time) == "function" then
-        seed = seed + tonumber(os.time())
-    end
-
-    seed = seed + tonumber(DevTestBed.GetNowMs() or 0)
-    math.randomseed(seed)
-    math.random()
-    math.random()
-    math.random()
-
-    DevTestBed.randomSeeded = true
-end
-
-function DevTestBed.CopyFurnitureList(source)
-    local copied = {}
-
-    for index, furnitureInfo in ipairs(source or {}) do
-        if furnitureInfo and furnitureInfo.furnitureId then
-            copied[index] = {
-                furnitureId = furnitureInfo.furnitureId,
-            }
-        end
-    end
-
-    return copied
-end
-
-function DevTestBed.ShuffleFurnitureList(list)
-    list = list or {}
-    DevTestBed.SeedRandomOnce()
-
-    for i = #list, 2, -1 do
-        local j = math.random(i)
-        list[i], list[j] = list[j], list[i]
-    end
-
-    return list
-end
-
-function DevTestBed.SplitRandomTargetAndDecoyFurniture(source, targetCount)
-    local shuffled = DevTestBed.ShuffleFurnitureList(DevTestBed.CopyFurnitureList(source))
-    local targets = {}
-    local decoys = {}
-
-    for index, furnitureInfo in ipairs(shuffled) do
-        if index <= targetCount then
-            table.insert(targets, furnitureInfo)
-        else
-            table.insert(decoys, furnitureInfo)
-        end
-    end
-
-    return targets, decoys
-end
-
-function DevTestBed.ResetGameRuntimeState(mode, requiredCount, timeLimitMinutes)
-    DevTestBed.game.active = true
-    DevTestBed.game.mode = mode
-    DevTestBed.game.threshold = requiredCount
-    DevTestBed.game.winner = nil
-    DevTestBed.game.winnerKey = nil
-    DevTestBed.game.locked = false
-    DevTestBed.game.pulseFurnitureLookup = {}
-    DevTestBed.game.pulseSequence = {}
-    DevTestBed.game.pulseIndex = 0
-    DevTestBed.game.pulsePreviousFurnitureId = nil
-    DevTestBed.game.pulseIntervalMs = 1500
-    DevTestBed.game.startTimeMs = DevTestBed.GetNowMs()
-    DevTestBed.game.timeLimitMinutes = timeLimitMinutes
-    DevTestBed.game.endTimeMs = timeLimitMinutes and (DevTestBed.game.startTimeMs + (timeLimitMinutes * 60 * 1000)) or nil
-    DevTestBed.game.frozenTimeMs = nil
-    DevTestBed.game.overtime = false
-    DevTestBed.game.lastTimerRefreshSecond = nil
-end
-
-function DevTestBed.UpdateGameTimerRefresh()
-    local nowMs = DevTestBed.GetNowMs()
-    local currentTimerSecond = math.floor(nowMs / 1000)
-
-    if not DevTestBed.game.locked and DevTestBed.game.lastTimerRefreshSecond ~= currentTimerSecond then
-        DevTestBed.game.lastTimerRefreshSecond = currentTimerSecond
-        DevTestBed.RefreshGameStatusWindow()
-    end
-end
-
-function DevTestBed.UpdateTrackedTeamCounts()
-    local pulseLookup = DevTestBed.game.pulseFurnitureLookup or {}
-
-    for key, entry in pairs(DevTestBed.savedVars.items or {}) do
-        if entry.trackedFurnitureIds and entry.lastStates then
-            local winningState = tonumber(entry.state)
-            local currentWinCount = 0
-
-            for _, furnitureInfo in ipairs(entry.trackedFurnitureIds) do
-                local furnitureId = furnitureInfo and furnitureInfo.furnitureId
-
-                if furnitureId then
-                    local currentState = GetPlacedHousingFurnitureCurrentObjectStateIndex(furnitureId)
-                    local previousState = entry.lastStates[furnitureId]
-
-                    if currentState ~= nil then
-                        currentState = tonumber(currentState)
-
-                        if DevTestBed.game.locked then
-                            if not pulseLookup[furnitureId] and previousState ~= nil and tonumber(previousState) ~= currentState then
-                                HousingEditorRequestChangeState(furnitureId, previousState)
-                                currentState = tonumber(previousState)
-                            end
-                        else
-                            entry.lastStates[furnitureId] = currentState
-                        end
-
-                        if currentState == winningState then
-                            currentWinCount = currentWinCount + 1
-                        end
-                    end
-                end
-            end
-
-            if not DevTestBed.game.locked then
-                entry.currentWinCount = currentWinCount
-                DevTestBed.RefreshGameStatusWindow()
-
-                if currentWinCount >= tonumber(entry.requiredWinCount or DevTestBed.game.threshold or 0) then
-                    DevTestBed.DeclareThresholdWinner(key, entry)
-                    return true
-                end
-            end
-        end
-    end
-
-    return false
-end
-
-function DevTestBed.ValidateGameStartCountAndTime(modeName, countText, timeLimitText)
-    local count = tonumber(countText)
-    local timeLimitMinutes = tonumber(timeLimitText)
-    local usage = "/dtb start " .. tostring(modeName) .. " <count> [minutes]"
-
-    if not count or count < 1 or count ~= math.floor(count) then
-        DevTestBed.Print("Use: " .. usage)
-        DevTestBed.Print("Count must be a whole number of at least 1.")
-        return nil, nil
-    end
-
-    if timeLimitMinutes ~= nil then
-        if timeLimitMinutes < 1 or timeLimitMinutes > 60 or timeLimitMinutes ~= math.floor(timeLimitMinutes) then
-            DevTestBed.Print("Use: " .. usage)
-            DevTestBed.Print("Optional minutes must be a whole number from 1 to 60.")
-            return nil, nil
-        end
-    end
-
-    return count, timeLimitMinutes
-end
-
 function DevTestBed.StartWinnerPulse(winnerKey)
     EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "WinnerPulse")
 
@@ -1334,10 +1178,56 @@ function DevTestBed.CheckThresholdGameState()
         return
     end
 
-    DevTestBed.UpdateGameTimerRefresh()
+    local nowMs = DevTestBed.GetNowMs()
+    local currentTimerSecond = math.floor(nowMs / 1000)
+    if not DevTestBed.game.locked and DevTestBed.game.lastTimerRefreshSecond ~= currentTimerSecond then
+        DevTestBed.game.lastTimerRefreshSecond = currentTimerSecond
+        DevTestBed.RefreshGameStatusWindow()
+    end
 
-    if DevTestBed.UpdateTrackedTeamCounts() then
-        return
+    local pulseLookup = DevTestBed.game.pulseFurnitureLookup or {}
+
+    for key, entry in pairs(DevTestBed.savedVars.items or {}) do
+        if entry.trackedFurnitureIds and entry.lastStates then
+            local winningState = tonumber(entry.state)
+            local currentWinCount = 0
+
+            for _, furnitureInfo in ipairs(entry.trackedFurnitureIds) do
+                local furnitureId = furnitureInfo and furnitureInfo.furnitureId
+
+                if furnitureId then
+                    local currentState = GetPlacedHousingFurnitureCurrentObjectStateIndex(furnitureId)
+                    local previousState = entry.lastStates[furnitureId]
+
+                    if currentState ~= nil then
+                        currentState = tonumber(currentState)
+
+                        if DevTestBed.game.locked then
+                            if not pulseLookup[furnitureId] and previousState ~= nil and tonumber(previousState) ~= currentState then
+                                HousingEditorRequestChangeState(furnitureId, previousState)
+                                currentState = tonumber(previousState)
+                            end
+                        else
+                            entry.lastStates[furnitureId] = currentState
+                        end
+
+                        if currentState == winningState then
+                            currentWinCount = currentWinCount + 1
+                        end
+                    end
+                end
+            end
+
+            if not DevTestBed.game.locked then
+                entry.currentWinCount = currentWinCount
+                DevTestBed.RefreshGameStatusWindow()
+
+                if currentWinCount >= tonumber(entry.requiredWinCount or DevTestBed.game.threshold or 0) then
+                    DevTestBed.DeclareThresholdWinner(key, entry)
+                    return
+                end
+            end
+        end
     end
 
     if not DevTestBed.game.locked then
@@ -1474,7 +1364,23 @@ function DevTestBed.StartThresholdMode(thresholdCount, timeLimitMinutes)
         end
     end
 
-    DevTestBed.ResetGameRuntimeState("threshold", thresholdCount, timeLimitMinutes)
+    DevTestBed.game.active = true
+    DevTestBed.game.mode = "threshold"
+    DevTestBed.game.threshold = thresholdCount
+    DevTestBed.game.winner = nil
+    DevTestBed.game.winnerKey = nil
+    DevTestBed.game.locked = false
+    DevTestBed.game.pulseFurnitureLookup = {}
+    DevTestBed.game.pulseSequence = {}
+    DevTestBed.game.pulseIndex = 0
+    DevTestBed.game.pulsePreviousFurnitureId = nil
+    DevTestBed.game.pulseIntervalMs = 1500
+    DevTestBed.game.startTimeMs = DevTestBed.GetNowMs()
+    DevTestBed.game.timeLimitMinutes = timeLimitMinutes
+    DevTestBed.game.endTimeMs = timeLimitMinutes and (DevTestBed.game.startTimeMs + (timeLimitMinutes * 60 * 1000)) or nil
+    DevTestBed.game.frozenTimeMs = nil
+    DevTestBed.game.overtime = false
+    DevTestBed.game.lastTimerRefreshSecond = nil
 
     EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "ThresholdWatcher")
     EVENT_MANAGER:RegisterForUpdate(DevTestBed.name .. "ThresholdWatcher", 250, DevTestBed.CheckThresholdGameState)
@@ -1490,6 +1396,130 @@ function DevTestBed.StartThresholdMode(thresholdCount, timeLimitMinutes)
 
     if changedCount > 0 then
         DevTestBed.Dbg("Placed " .. tostring(changedCount) .. " item(s) into their non-winning state.")
+    end
+end
+
+function DevTestBed.SeedRandomOnce()
+    if DevTestBed.randomSeeded then
+        return
+    end
+
+    local seed = 0
+
+    if type(GetTimeStamp) == "function" then
+        seed = seed + tonumber(GetTimeStamp() or 0)
+    end
+
+    if type(GetGameTimeMilliseconds) == "function" then
+        seed = seed + tonumber(GetGameTimeMilliseconds() or 0)
+    end
+
+    math.randomseed(seed)
+    math.random()
+    math.random()
+    math.random()
+
+    DevTestBed.randomSeeded = true
+end
+
+function DevTestBed.ShuffleFurnitureList(source)
+    DevTestBed.SeedRandomOnce()
+
+    local shuffled = {}
+
+    for index, value in ipairs(source or {}) do
+        shuffled[index] = value
+    end
+
+    for index = #shuffled, 2, -1 do
+        local swapIndex = math.random(index)
+        shuffled[index], shuffled[swapIndex] = shuffled[swapIndex], shuffled[index]
+    end
+
+    return shuffled
+end
+
+function DevTestBed.SplitRandomTargetAndDecoyFurniture(source, targetCount)
+    local shuffled = DevTestBed.ShuffleFurnitureList(source)
+    local targets = {}
+    local decoys = {}
+
+    for index, furnitureInfo in ipairs(shuffled) do
+        if index <= tonumber(targetCount or 0) then
+            table.insert(targets, furnitureInfo)
+        else
+            table.insert(decoys, furnitureInfo)
+        end
+    end
+
+    return targets, decoys
+end
+
+function DevTestBed.CheckTargetGameState()
+    if not DevTestBed.game or not DevTestBed.game.active or DevTestBed.game.mode ~= "target" then
+        EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "TargetWatcher")
+        return
+    end
+
+    if not DevTestBed.IsInHouse(false) then
+        DevTestBed.ClearActiveGameDueToLeavingHouse()
+        return
+    end
+
+    local nowMs = DevTestBed.GetNowMs()
+    local currentTimerSecond = math.floor(nowMs / 1000)
+    if not DevTestBed.game.locked and DevTestBed.game.lastTimerRefreshSecond ~= currentTimerSecond then
+        DevTestBed.game.lastTimerRefreshSecond = currentTimerSecond
+        DevTestBed.RefreshGameStatusWindow()
+    end
+
+    local pulseLookup = DevTestBed.game.pulseFurnitureLookup or {}
+
+    for key, entry in pairs(DevTestBed.savedVars.items or {}) do
+        if entry.trackedFurnitureIds and entry.lastStates then
+            local winningState = tonumber(entry.state)
+            local currentWinCount = 0
+
+            for _, furnitureInfo in ipairs(entry.trackedFurnitureIds) do
+                local furnitureId = furnitureInfo and furnitureInfo.furnitureId
+
+                if furnitureId then
+                    local currentState = GetPlacedHousingFurnitureCurrentObjectStateIndex(furnitureId)
+                    local previousState = entry.lastStates[furnitureId]
+
+                    if currentState ~= nil then
+                        currentState = tonumber(currentState)
+
+                        if DevTestBed.game.locked then
+                            if not pulseLookup[furnitureId] and previousState ~= nil and tonumber(previousState) ~= currentState then
+                                HousingEditorRequestChangeState(furnitureId, previousState)
+                                currentState = tonumber(previousState)
+                            end
+                        else
+                            entry.lastStates[furnitureId] = currentState
+                        end
+
+                        if currentState == winningState then
+                            currentWinCount = currentWinCount + 1
+                        end
+                    end
+                end
+            end
+
+            if not DevTestBed.game.locked then
+                entry.currentWinCount = currentWinCount
+                DevTestBed.RefreshGameStatusWindow()
+
+                if currentWinCount >= tonumber(entry.requiredWinCount or DevTestBed.game.threshold or 0) then
+                    DevTestBed.DeclareThresholdWinner(key, entry)
+                    return
+                end
+            end
+        end
+    end
+
+    if not DevTestBed.game.locked then
+        DevTestBed.CheckThresholdTimerExpired()
     end
 end
 
@@ -1516,9 +1546,21 @@ function DevTestBed.StartTargetMode(targetCount, timeLimitMinutes)
         return
     end
 
-    targetCount, timeLimitMinutes = DevTestBed.ValidateGameStartCountAndTime("target", targetCount, timeLimitMinutes)
-    if not targetCount then
+    targetCount = tonumber(targetCount)
+    timeLimitMinutes = tonumber(timeLimitMinutes)
+
+    if not targetCount or targetCount < 1 or targetCount ~= math.floor(targetCount) then
+        DevTestBed.Print("Use: /dtb start target <count> [minutes]")
+        DevTestBed.Print("Count must be a whole number of at least 1.")
         return
+    end
+
+    if timeLimitMinutes ~= nil then
+        if timeLimitMinutes < 1 or timeLimitMinutes > 60 or timeLimitMinutes ~= math.floor(timeLimitMinutes) then
+            DevTestBed.Print("Use: /dtb start target <count> [minutes]")
+            DevTestBed.Print("Optional minutes must be a whole number from 1 to 60.")
+            return
+        end
     end
 
     DevTestBed.savedVars.items = DevTestBed.savedVars.items or {}
@@ -1604,12 +1646,29 @@ function DevTestBed.StartTargetMode(targetCount, timeLimitMinutes)
         return
     end
 
-    DevTestBed.ResetGameRuntimeState("target", targetCount, timeLimitMinutes)
+    DevTestBed.game.active = true
+    DevTestBed.game.mode = "target"
+    DevTestBed.game.threshold = targetCount
+    DevTestBed.game.winner = nil
+    DevTestBed.game.winnerKey = nil
+    DevTestBed.game.locked = false
+    DevTestBed.game.pulseFurnitureLookup = {}
+    DevTestBed.game.pulseSequence = {}
+    DevTestBed.game.pulseIndex = 0
+    DevTestBed.game.pulsePreviousFurnitureId = nil
+    DevTestBed.game.pulseIntervalMs = 1500
+    DevTestBed.game.startTimeMs = DevTestBed.GetNowMs()
+    DevTestBed.game.timeLimitMinutes = timeLimitMinutes
+    DevTestBed.game.endTimeMs = timeLimitMinutes and (DevTestBed.game.startTimeMs + (timeLimitMinutes * 60 * 1000)) or nil
+    DevTestBed.game.frozenTimeMs = nil
+    DevTestBed.game.overtime = false
+    DevTestBed.game.lastTimerRefreshSecond = nil
 
     decoyQueue = DevTestBed.ShuffleFurnitureList(decoyQueue)
     local decoyIndex = 0
 
     if #decoyQueue > 0 then
+        EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "TargetDecoyRandomizer")
         EVENT_MANAGER:RegisterForUpdate(DevTestBed.name .. "TargetDecoyRandomizer", 500, function()
             if not DevTestBed.game or not DevTestBed.game.active or DevTestBed.game.mode ~= "target" or DevTestBed.game.locked then
                 EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "TargetDecoyRandomizer")
@@ -1648,28 +1707,6 @@ function DevTestBed.StartTargetMode(targetCount, timeLimitMinutes)
 
     if targetChangedCount > 0 then
         DevTestBed.Dbg("Placed " .. tostring(targetChangedCount) .. " monitored target item(s) into their non-winning state.")
-    end
-end
-
-function DevTestBed.CheckTargetGameState()
-    if not DevTestBed.game or not DevTestBed.game.active or DevTestBed.game.mode ~= "target" then
-        EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "TargetWatcher")
-        return
-    end
-
-    if not DevTestBed.IsInHouse(false) then
-        DevTestBed.ClearActiveGameDueToLeavingHouse()
-        return
-    end
-
-    DevTestBed.UpdateGameTimerRefresh()
-
-    if DevTestBed.UpdateTrackedTeamCounts() then
-        return
-    end
-
-    if not DevTestBed.game.locked then
-        DevTestBed.CheckThresholdTimerExpired()
     end
 end
 
@@ -1756,6 +1793,98 @@ function DevTestBed.Start()
     ))
 end
 
+--[[
+    DevTestBed.ResetGame
+
+    Stops any active game, watcher updates, winner pulse, and target decoy cycling,
+    then sets every placed furnishing belonging to every saved team to that team's
+    non-winning state.
+
+    Usage:
+        /dtb reset
+
+    Behavior:
+        - Requires the player to be inside a house
+        - Requires housing editor permissions
+        - Stops threshold watcher, target watcher, target decoy randomizer, and winner pulse
+        - Clears active winner/game state
+        - Rescans all saved team furnitureDataIds
+        - Sets all matching 2-state furnishings to the non-winning state
+        - Hides the status window after reset
+]]
+function DevTestBed.ResetGame()
+    if not DevTestBed.IsInHouse(true) then
+        return
+    end
+
+    if not HasAnyEditingPermissionsForCurrentHouse() then
+        DevTestBed.Print("You must have housing editor permissions to use this command.")
+        return
+    end
+
+    DevTestBed.savedVars.items = DevTestBed.savedVars.items or {}
+
+    local teamCount = 0
+    local scannedCount = 0
+    local changedCount = 0
+
+    -- Stop all active game update loops before making reset state changes.
+    -- This unregisters threshold, target, decoy randomizer, and winner pulse updates.
+    DevTestBed.StopThresholdGame(true)
+
+    for key, entry in pairs(DevTestBed.savedVars.items) do
+        teamCount = teamCount + 1
+
+        local furnitureDataId = entry.furnitureDataId
+        local winningState = tonumber(entry.state)
+
+        if furnitureDataId and winningState ~= nil then
+            local matchingFurniture, matchingCount = DevTestBed.GetMatchingHouseFurniture(furnitureDataId)
+            local nonWinningState = DevTestBed.GetNonWinningState(winningState)
+
+            entry.furnitureIds = matchingFurniture
+            entry.matchingCount = matchingCount
+
+            for _, furnitureInfo in ipairs(matchingFurniture or {}) do
+                local furnitureId = furnitureInfo and furnitureInfo.furnitureId
+
+                if furnitureId then
+                    local numStates = GetPlacedHousingFurnitureNumObjectStates(furnitureId)
+
+                    if numStates == 2 then
+                        scannedCount = scannedCount + 1
+
+                        local currentState = GetPlacedHousingFurnitureCurrentObjectStateIndex(furnitureId)
+
+                        if tonumber(currentState) ~= tonumber(nonWinningState) then
+                            HousingEditorRequestChangeState(furnitureId, nonWinningState)
+                            changedCount = changedCount + 1
+                        end
+                    end
+                end
+            end
+        else
+            DevTestBed.Dbg(zo_strformat(
+                "Reset skipped team <<1>> because furnitureDataId or winning state was missing.",
+                tostring(entry.name or key)
+            ))
+        end
+    end
+
+    DevTestBed.HideGameStatusWindow()
+
+    if teamCount == 0 then
+        DevTestBed.Print("No teams have been created.")
+        return
+    end
+
+    DevTestBed.Print(zo_strformat(
+        "Reset complete. Stopped the active game and set |c00FF00<<1>>|r of |c00FF00<<2>>|r team item(s) to their non-winning state.",
+        tostring(changedCount),
+        tostring(scannedCount)
+    ))
+end
+
 
 function DevTestBed.HandleSlashCommand(args)
     local cmd, rest = string.match(args or "", "^%s*(%S*)%s*(.-)%s*$")
@@ -1799,6 +1928,11 @@ function DevTestBed.HandleSlashCommand(args)
 
     if cmd == "deleteall" then
         DevTestBed.DeleteAllTeams()
+        return
+    end
+
+    if cmd == "reset" then
+        DevTestBed.ResetGame()
         return
     end
 
