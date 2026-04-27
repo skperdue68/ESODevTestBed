@@ -29,7 +29,7 @@ function DevTestBed.ShowHelp()
     DevTestBed.Print("/dtb add <name> - Creates a team with the selected Item in its current state")
     DevTestBed.Print("/dtb delete <name> - Delete a team")
     DevTestBed.Print("/dtb deleteall - Delete all teams")
-    DevTestBed.Print("/dtb start threshold <count> - Reset all team items to non-winning state, then track all team items and win when count are in the winning state")
+    DevTestBed.Print("/dtb start threshold <count> [minutes] - Start threshold mode. Optional minutes must be 1-60 and enables timed/overtime scoring")
     DevTestBed.Print("/dtb window - Toggle the game status window")
 end
 
@@ -764,7 +764,7 @@ function DevTestBed.RefreshGameStatusWindow()
     end
 
     local game = DevTestBed.game or {}
-    local modeText = game.mode or "None"
+    local modeText = DevTestBed.GetGameModeDisplayText()
 
     DevTestBed.ui.statusModeLabel:SetText("Mode: " .. tostring(modeText))
 
@@ -835,11 +835,101 @@ DevTestBed.game = DevTestBed.game or {
     pulseSequence = {},
     pulseIndex = 0,
     pulsePreviousFurnitureId = nil,
+    startTimeMs = nil,
+    endTimeMs = nil,
+    frozenTimeMs = nil,
+    timeLimitMinutes = nil,
+    overtime = false,
+    lastTimerRefreshSecond = nil,
 }
+
+function DevTestBed.GetNowMs()
+    if type(GetGameTimeMilliseconds) == "function" then
+        return GetGameTimeMilliseconds()
+    end
+
+    if type(GetFrameTimeMilliseconds) == "function" then
+        return GetFrameTimeMilliseconds()
+    end
+
+    return math.floor(GetFrameTimeSeconds() * 1000)
+end
+
+function DevTestBed.FormatTimerFromSeconds(totalSeconds)
+    totalSeconds = math.max(0, math.floor(tonumber(totalSeconds or 0)))
+
+    local minutes = math.floor(totalSeconds / 60)
+    local seconds = totalSeconds % 60
+
+    return string.format("%02d:%02d", minutes, seconds)
+end
+
+function DevTestBed.TitleCaseFirst(value)
+    value = tostring(value or "")
+
+    if value == "" then
+        return "None"
+    end
+
+    return string.upper(string.sub(value, 1, 1)) .. string.sub(value, 2)
+end
+
+function DevTestBed.GetGameTimerDisplayText()
+    local game = DevTestBed.game or {}
+
+    if not game.startTimeMs then
+        return ""
+    end
+
+    if game.overtime and not game.winner then
+        return "Overtime"
+    end
+
+    local nowMs = game.frozenTimeMs or DevTestBed.GetNowMs()
+
+    if game.endTimeMs then
+        local remainingSeconds = math.ceil((game.endTimeMs - nowMs) / 1000)
+        return DevTestBed.FormatTimerFromSeconds(remainingSeconds)
+    end
+
+    local elapsedSeconds = math.floor((nowMs - game.startTimeMs) / 1000)
+    return DevTestBed.FormatTimerFromSeconds(elapsedSeconds)
+end
+
+function DevTestBed.GetGameModeDisplayText()
+    local game = DevTestBed.game or {}
+
+    if not game.mode then
+        return "None"
+    end
+
+    local text = DevTestBed.TitleCaseFirst(game.mode)
+
+    if game.threshold and tonumber(game.threshold or 0) > 0 then
+        text = text .. " (" .. tostring(game.threshold) .. ")"
+    end
+
+    local timerText = DevTestBed.GetGameTimerDisplayText()
+    if timerText ~= "" then
+        text = text .. " " .. timerText
+    end
+
+    return text
+end
+
+function DevTestBed.ClearRuntimeTeamGameData()
+    for _, entry in pairs(DevTestBed.savedVars and DevTestBed.savedVars.items or {}) do
+        entry.trackedFurnitureIds = nil
+        entry.requiredWinCount = nil
+        entry.currentWinCount = nil
+        entry.lastStates = nil
+    end
+end
 
 function DevTestBed.StopThresholdGame(clearWinner)
     EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "ThresholdWatcher")
     EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "WinnerPulse")
+    DevTestBed.ClearRuntimeTeamGameData()
 
     DevTestBed.game = DevTestBed.game or {}
     DevTestBed.game.active = false
@@ -853,6 +943,12 @@ function DevTestBed.StopThresholdGame(clearWinner)
     DevTestBed.game.pulseIndex = 0
     DevTestBed.game.pulsePreviousFurnitureId = nil
     DevTestBed.game.pulseIntervalMs = 1500
+    DevTestBed.game.startTimeMs = nil
+    DevTestBed.game.endTimeMs = nil
+    DevTestBed.game.frozenTimeMs = nil
+    DevTestBed.game.timeLimitMinutes = nil
+    DevTestBed.game.overtime = false
+    DevTestBed.game.lastTimerRefreshSecond = nil
 
     if clearWinner then
         DevTestBed.game.winner = nil
@@ -954,6 +1050,87 @@ function DevTestBed.StartWinnerPulse(winnerKey)
     end)
 end
 
+function DevTestBed.ClearActiveGameDueToLeavingHouse()
+    if not DevTestBed.game or not DevTestBed.game.active then
+        return
+    end
+
+    DevTestBed.StopThresholdGame(true)
+    DevTestBed.HideGameStatusWindow()
+    DevTestBed.Print("Game cleared because you left the house.")
+end
+
+function DevTestBed.GetHighestPercentTeams()
+    local highestPercent = nil
+    local leaders = {}
+
+    for key, entry in pairs(DevTestBed.savedVars.items or {}) do
+        if entry.trackedFurnitureIds then
+            local currentCount = tonumber(entry.currentWinCount or 0) or 0
+            local requiredCount = tonumber(entry.requiredWinCount or DevTestBed.game.threshold or 0) or 0
+            local percent = 0
+
+            if requiredCount > 0 then
+                percent = (currentCount / requiredCount) * 100
+            end
+
+            if highestPercent == nil or percent > highestPercent then
+                highestPercent = percent
+                leaders = {
+                    {
+                        key = key,
+                        entry = entry,
+                        percent = percent,
+                    }
+                }
+            elseif percent == highestPercent then
+                table.insert(leaders, {
+                    key = key,
+                    entry = entry,
+                    percent = percent,
+                })
+            end
+        end
+    end
+
+    return leaders, highestPercent or 0
+end
+
+function DevTestBed.CheckThresholdTimerExpired()
+    local game = DevTestBed.game or {}
+
+    if game.locked or not game.endTimeMs then
+        return false
+    end
+
+    local nowMs = DevTestBed.GetNowMs()
+    if nowMs < game.endTimeMs and not game.overtime then
+        return false
+    end
+
+    local leaders = DevTestBed.GetHighestPercentTeams()
+
+    if #leaders == 1 then
+        DevTestBed.DeclareThresholdWinner(leaders[1].key, leaders[1].entry)
+        return true
+    end
+
+    if #leaders > 1 then
+        if not game.overtime then
+            DevTestBed.Print("Time expired with a tie. Overtime continues until one team has the highest percentage.")
+        end
+
+        game.overtime = true
+        DevTestBed.RefreshGameStatusWindow()
+    end
+
+    return false
+end
+
+function DevTestBed.OnPlayerActivated()
+    DevTestBed.ClearActiveGameDueToLeavingHouse()
+end
+
 function DevTestBed.DeclareThresholdWinner(winnerKey, entry)
     if DevTestBed.game.locked then
         return
@@ -965,6 +1142,7 @@ function DevTestBed.DeclareThresholdWinner(winnerKey, entry)
     DevTestBed.game.winnerKey = winnerKey
     DevTestBed.game.locked = true
     DevTestBed.game.active = true
+    DevTestBed.game.frozenTimeMs = DevTestBed.GetNowMs()
 
     local message = zo_strformat("|c00FF00<<1>> wins!|r", winnerName)
 
@@ -979,6 +1157,18 @@ function DevTestBed.CheckThresholdGameState()
     if not DevTestBed.game or not DevTestBed.game.active or DevTestBed.game.mode ~= "threshold" then
         EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "ThresholdWatcher")
         return
+    end
+
+    if not DevTestBed.IsInHouse(false) then
+        DevTestBed.ClearActiveGameDueToLeavingHouse()
+        return
+    end
+
+    local nowMs = DevTestBed.GetNowMs()
+    local currentTimerSecond = math.floor(nowMs / 1000)
+    if not DevTestBed.game.locked and DevTestBed.game.lastTimerRefreshSecond ~= currentTimerSecond then
+        DevTestBed.game.lastTimerRefreshSecond = currentTimerSecond
+        DevTestBed.RefreshGameStatusWindow()
     end
 
     local pulseLookup = DevTestBed.game.pulseFurnitureLookup or {}
@@ -1025,6 +1215,10 @@ function DevTestBed.CheckThresholdGameState()
             end
         end
     end
+
+    if not DevTestBed.game.locked then
+        DevTestBed.CheckThresholdTimerExpired()
+    end
 end
 
 --[[
@@ -1033,7 +1227,7 @@ end
     Starts threshold mode.
 
     Usage:
-        /dtb start threshold <count>
+        /dtb start threshold <count> [minutes]
 
     Rules:
         - Rescans matching items for every team
@@ -1043,7 +1237,7 @@ end
         - All matching items are tracked
         - A team wins when count tracked items are in that team's saved winning state
 ]]
-function DevTestBed.StartThresholdMode(thresholdCount)
+function DevTestBed.StartThresholdMode(thresholdCount, timeLimitMinutes)
     if not DevTestBed.IsInHouse(true) then return end
 
     if not HasAnyEditingPermissionsForCurrentHouse() then
@@ -1052,11 +1246,20 @@ function DevTestBed.StartThresholdMode(thresholdCount)
     end
 
     thresholdCount = tonumber(thresholdCount)
+    timeLimitMinutes = tonumber(timeLimitMinutes)
 
     if not thresholdCount or thresholdCount < 1 or thresholdCount ~= math.floor(thresholdCount) then
-        DevTestBed.Print("Use: /dtb start threshold <count>")
+        DevTestBed.Print("Use: /dtb start threshold <count> [minutes]")
         DevTestBed.Print("Count must be a whole number of at least 1.")
         return
+    end
+
+    if timeLimitMinutes ~= nil then
+        if timeLimitMinutes < 1 or timeLimitMinutes > 60 or timeLimitMinutes ~= math.floor(timeLimitMinutes) then
+            DevTestBed.Print("Use: /dtb start threshold <count> [minutes]")
+            DevTestBed.Print("Optional minutes must be a whole number from 1 to 60.")
+            return
+        end
     end
 
     DevTestBed.savedVars.items = DevTestBed.savedVars.items or {}
@@ -1106,6 +1309,7 @@ function DevTestBed.StartThresholdMode(thresholdCount)
 
     if not countsAreEqual then
         DevTestBed.ShowThresholdCountMismatch()
+        DevTestBed.ClearRuntimeTeamGameData()
         return
     end
 
@@ -1116,6 +1320,7 @@ function DevTestBed.StartThresholdMode(thresholdCount)
             "Threshold mode cancelled. Count must be between 1 and <<1>>.",
             tostring(expectedMatchCount)
         ))
+        DevTestBed.ClearRuntimeTeamGameData()
         return
     end
 
@@ -1156,6 +1361,12 @@ function DevTestBed.StartThresholdMode(thresholdCount)
     DevTestBed.game.pulseIndex = 0
     DevTestBed.game.pulsePreviousFurnitureId = nil
     DevTestBed.game.pulseIntervalMs = 1500
+    DevTestBed.game.startTimeMs = DevTestBed.GetNowMs()
+    DevTestBed.game.timeLimitMinutes = timeLimitMinutes
+    DevTestBed.game.endTimeMs = timeLimitMinutes and (DevTestBed.game.startTimeMs + (timeLimitMinutes * 60 * 1000)) or nil
+    DevTestBed.game.frozenTimeMs = nil
+    DevTestBed.game.overtime = false
+    DevTestBed.game.lastTimerRefreshSecond = nil
 
     EVENT_MANAGER:UnregisterForUpdate(DevTestBed.name .. "ThresholdWatcher")
     EVENT_MANAGER:RegisterForUpdate(DevTestBed.name .. "ThresholdWatcher", 250, DevTestBed.CheckThresholdGameState)
@@ -1308,7 +1519,18 @@ function DevTestBed.HandleSlashCommand(args)
         mode = string.lower(mode or "")
 
         if mode == "threshold" then
-            DevTestBed.StartThresholdMode(countText)
+            local thresholdText, minutesText, extraText = string.match(countText or "", "^(%S*)%s*(%S*)%s*(.-)%s*$")
+
+            if extraText and extraText ~= "" then
+                DevTestBed.Print("Use: /dtb start threshold <count> [minutes]")
+                return
+            end
+
+            if minutesText == "" then
+                minutesText = nil
+            end
+
+            DevTestBed.StartThresholdMode(thresholdText, minutesText)
             return
         end
 
@@ -1316,7 +1538,7 @@ function DevTestBed.HandleSlashCommand(args)
             DevTestBed.Print("Unknown start mode: " .. tostring(mode))
         end
 
-        DevTestBed.Print("Use: /dtb start threshold <count>")
+        DevTestBed.Print("Use: /dtb start threshold <count> [minutes]")
         return
     end
 
@@ -1351,6 +1573,8 @@ function DevTestBed.OnAddonLoaded(eventCode, addonName)
 
     SLASH_COMMANDS["/devtestbed"] = DevTestBed.HandleSlashCommand
     SLASH_COMMANDS["/dtb"] = DevTestBed.HandleSlashCommand
+
+    EVENT_MANAGER:RegisterForEvent(DevTestBed.name, EVENT_PLAYER_ACTIVATED, DevTestBed.OnPlayerActivated)
 
     DevTestBed.Dbg("Initialized.")
 end
