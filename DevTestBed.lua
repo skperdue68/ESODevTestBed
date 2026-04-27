@@ -33,6 +33,7 @@ function DevTestBed.ShowHelp()
     DevTestBed.Print("/dtb start target <count> [minutes] - Start target mode. Randomly chooses count monitored items per team; optional minutes works like threshold")
     DevTestBed.Print("/dtb reset - Stop the active game and set all team items to their non-winning state")
     DevTestBed.Print("/dtb window - Toggle the game status window")
+    DevTestBed.Print("/dtb controls - Toggle the game control panel")
 end
 
 
@@ -492,6 +493,11 @@ function DevTestBed.AddSelectedFurniture(name)
         tostring(stateName),
         tostring(matchingCount)
     ))
+
+    if DevTestBed.ui and DevTestBed.ui.controlWindow then
+        DevTestBed.PopulateControlCountDropdown()
+        DevTestBed.RefreshControlWindow()
+    end
 end
 
 
@@ -586,6 +592,11 @@ function DevTestBed.DeleteTeam(name)
         tostring(entry.name or name),
         tostring(entry.itemName or "Unknown")
     ))
+
+    if DevTestBed.ui and DevTestBed.ui.controlWindow then
+        DevTestBed.PopulateControlCountDropdown()
+        DevTestBed.RefreshControlWindow()
+    end
 end
 
 
@@ -621,6 +632,11 @@ function DevTestBed.DeleteAllTeams()
         DevTestBed.Print("No teams to delete.")
     else
         DevTestBed.Print("Deleted " .. tostring(count) .. " team(s).")
+    end
+
+    if DevTestBed.ui and DevTestBed.ui.controlWindow then
+        DevTestBed.PopulateControlCountDropdown()
+        DevTestBed.RefreshControlWindow()
     end
 end
 
@@ -829,6 +845,470 @@ function DevTestBed.ToggleGameStatusWindow()
     if window:IsHidden() then
         window:SetHidden(false)
         DevTestBed.RefreshGameStatusWindow()
+    else
+        window:SetHidden(true)
+    end
+end
+
+
+--[[
+    DevTestBed Control Panel Window
+
+    Admin-style window used to select game mode, required count, optional time
+    limit, and to start/reset games without typing slash commands.
+]]
+DevTestBed.CONTROL_TIME_OPTIONS = {
+    { label = "None", value = nil },
+    { label = "1 minute", value = 1 },
+    { label = "2 minutes", value = 2 },
+    { label = "3 minutes", value = 3 },
+    { label = "5 minutes", value = 5 },
+    { label = "10 minutes", value = 10 },
+    { label = "15 minutes", value = 15 },
+    { label = "20 minutes", value = 20 },
+    { label = "30 minutes", value = 30 },
+    { label = "45 minutes", value = 45 },
+    { label = "60 minutes", value = 60 },
+}
+
+function DevTestBed.CountSavedTeams()
+    local count = 0
+    for _ in pairs(DevTestBed.savedVars and DevTestBed.savedVars.items or {}) do
+        count = count + 1
+    end
+    return count
+end
+
+function DevTestBed.RefreshTeamMatchingCounts()
+    if not DevTestBed.savedVars then return end
+    DevTestBed.savedVars.items = DevTestBed.savedVars.items or {}
+
+    -- When in a house, rescan so the control panel count dropdown reflects the
+    -- currently placed furnishings. Outside a house, fall back to saved counts.
+    if not DevTestBed.IsInHouse(false) then
+        return
+    end
+
+    for _, entry in pairs(DevTestBed.savedVars.items) do
+        if entry.furnitureDataId then
+            local matchingFurniture, matchingCount = DevTestBed.GetMatchingHouseFurniture(entry.furnitureDataId)
+            entry.furnitureIds = matchingFurniture
+            entry.matchingCount = matchingCount
+        end
+    end
+end
+
+function DevTestBed.GetControlPanelCountInfo(mode, skipRescan)
+    mode = string.lower(tostring(mode or "threshold"))
+
+    if not skipRescan then
+        DevTestBed.RefreshTeamMatchingCounts()
+    end
+
+    local teamCount = 0
+    local minCount = nil
+    local firstCount = nil
+    local countsAreEqual = true
+
+    for _, entry in pairs(DevTestBed.savedVars and DevTestBed.savedVars.items or {}) do
+        teamCount = teamCount + 1
+        local count = tonumber(entry.matchingCount or 0) or 0
+
+        if minCount == nil or count < minCount then
+            minCount = count
+        end
+
+        if firstCount == nil then
+            firstCount = count
+        elseif count ~= firstCount then
+            countsAreEqual = false
+        end
+    end
+
+    if teamCount == 0 then
+        return 0, "No teams assigned", teamCount
+    end
+
+    if mode == "threshold" then
+        if not countsAreEqual then
+            return 0, "Team counts do not match", teamCount
+        end
+
+        if tonumber(firstCount or 0) < 1 then
+            return 0, "No matching items found", teamCount
+        end
+
+        return tonumber(firstCount), nil, teamCount
+    end
+
+    if tonumber(minCount or 0) < 1 then
+        return 0, "No matching items found", teamCount
+    end
+
+    return tonumber(minCount), nil, teamCount
+end
+
+function DevTestBed.GetControlPanelSelectedMode()
+    return DevTestBed.ui.selectedGameMode or "threshold"
+end
+
+function DevTestBed.GetControlPanelSelectedCount()
+    return tonumber(DevTestBed.ui.selectedRequiredCount or 1) or 1
+end
+
+function DevTestBed.GetControlPanelSelectedMinutes()
+    return DevTestBed.ui.selectedTimeLimitMinutes
+end
+
+function DevTestBed.SafeClearComboBox(comboBox)
+    if not comboBox then return end
+
+    if comboBox.ClearItems then
+        comboBox:ClearItems()
+    end
+end
+
+function DevTestBed.PopulateControlModeDropdown()
+    local combo = DevTestBed.ui.controlModeCombo
+    if not combo then return end
+
+    DevTestBed.SafeClearComboBox(combo)
+
+    local function addMode(label, value)
+        combo:AddItem(combo:CreateItemEntry(label, function()
+            DevTestBed.ui.selectedGameMode = value
+            DevTestBed.PopulateControlCountDropdown()
+            DevTestBed.RefreshControlWindow()
+        end))
+    end
+
+    addMode("Threshold", "threshold")
+    addMode("Target", "target")
+
+    DevTestBed.ui.selectedGameMode = DevTestBed.ui.selectedGameMode or "threshold"
+
+    if combo.SelectItemByIndex then
+        combo:SelectItemByIndex(DevTestBed.ui.selectedGameMode == "target" and 2 or 1)
+    elseif combo.SelectFirstItem then
+        combo:SelectFirstItem()
+    end
+end
+
+function DevTestBed.PopulateControlTimeDropdown()
+    local combo = DevTestBed.ui.controlTimeCombo
+    if not combo then return end
+
+    DevTestBed.SafeClearComboBox(combo)
+
+    for _, option in ipairs(DevTestBed.CONTROL_TIME_OPTIONS) do
+        combo:AddItem(combo:CreateItemEntry(option.label, function()
+            DevTestBed.ui.selectedTimeLimitMinutes = option.value
+            DevTestBed.RefreshControlWindow()
+        end))
+    end
+
+    if combo.SelectItemByIndex then
+        combo:SelectItemByIndex(1)
+    elseif combo.SelectFirstItem then
+        combo:SelectFirstItem()
+    end
+end
+
+function DevTestBed.PopulateControlCountDropdown()
+    local combo = DevTestBed.ui.controlCountCombo
+    if not combo then return end
+
+    DevTestBed.SafeClearComboBox(combo)
+
+    local mode = DevTestBed.GetControlPanelSelectedMode()
+    local maxCount = DevTestBed.GetControlPanelCountInfo(mode)
+
+    if tonumber(maxCount or 0) < 1 then
+        DevTestBed.ui.selectedRequiredCount = nil
+        combo:AddItem(combo:CreateItemEntry("No valid count", function()
+            DevTestBed.ui.selectedRequiredCount = nil
+        end))
+
+        if combo.SelectFirstItem then
+            combo:SelectFirstItem()
+        end
+        return
+    end
+
+    for count = 1, maxCount do
+        local label = tostring(count)
+
+        -- UX upgrade: mark the last value so the user can see the highest valid
+        -- dynamic value without needing to count the dropdown entries.
+        if count == maxCount then
+            if mode == "threshold" then
+                label = label .. " (All Items)"
+            else
+                label = label .. " (Max)"
+            end
+        end
+
+        combo:AddItem(combo:CreateItemEntry(label, function()
+            DevTestBed.ui.selectedRequiredCount = count
+            DevTestBed.RefreshControlWindow()
+        end))
+    end
+
+    if not DevTestBed.ui.selectedRequiredCount or DevTestBed.ui.selectedRequiredCount > maxCount then
+        DevTestBed.ui.selectedRequiredCount = 1
+    end
+
+    if combo.SelectItemByIndex then
+        combo:SelectItemByIndex(DevTestBed.ui.selectedRequiredCount)
+    elseif combo.SelectFirstItem then
+        combo:SelectFirstItem()
+    end
+end
+
+function DevTestBed.SetControlButtonEnabled(button, enabled)
+    if not button then return end
+
+    if button.SetEnabled then
+        button:SetEnabled(enabled)
+    end
+
+    button:SetMouseEnabled(enabled)
+
+    if enabled then
+        button:SetNormalFontColor(1, 1, 1, 1)
+        button:SetMouseOverFontColor(0.75, 0.9, 1, 1)
+    else
+        button:SetNormalFontColor(0.45, 0.45, 0.45, 1)
+        button:SetMouseOverFontColor(0.45, 0.45, 0.45, 1)
+    end
+end
+
+function DevTestBed.CreateControlLabel(parent, name, text, anchorTo, offsetY)
+    local label = WINDOW_MANAGER:CreateControl(name, parent, CT_LABEL)
+    label:SetFont("ZoFontGameBold")
+    label:SetColor(0.75, 0.9, 1, 1)
+    label:SetText(text)
+
+    if anchorTo then
+        label:SetAnchor(TOPLEFT, anchorTo, BOTTOMLEFT, 0, offsetY or 12)
+    else
+        label:SetAnchor(TOPLEFT, parent, TOPLEFT, 14, offsetY or 12)
+    end
+
+    return label
+end
+
+function DevTestBed.CreateControlButton(parent, name, text, width, height)
+    local button = WINDOW_MANAGER:CreateControl(name, parent, CT_BUTTON)
+    button:SetDimensions(width or 130, height or 30)
+    button:SetFont("ZoFontGameBold")
+    button:SetText(text)
+    button:SetNormalFontColor(1, 1, 1, 1)
+    button:SetMouseOverFontColor(0.75, 0.9, 1, 1)
+    button:SetPressedFontColor(0.5, 0.8, 1, 1)
+    return button
+end
+
+function DevTestBed.CreateControlWindow()
+    if DevTestBed.ui.controlWindow then
+        return DevTestBed.ui.controlWindow
+    end
+
+    local wm = WINDOW_MANAGER
+
+    local window = wm:CreateTopLevelWindow("DevTestBedControlWindow")
+    window:SetDimensions(360, 390)
+    window:SetAnchor(TOPRIGHT, GuiRoot, TOPRIGHT, -40, 100)
+    window:SetMouseEnabled(true)
+    window:SetMovable(true)
+    window:SetClampedToScreen(true)
+    window:SetHidden(true)
+
+    if window.SetResizable then
+        window:SetResizable(true)
+    end
+
+    if window.SetResizeHandleSize then
+        window:SetResizeHandleSize(16)
+    end
+
+    if window.SetDimensionConstraints then
+        window:SetDimensionConstraints(320, 360, 620, 620)
+    end
+
+    local backdrop = wm:CreateControl("$(parent)Backdrop", window, CT_BACKDROP)
+    backdrop:SetAnchorFill(window)
+    backdrop:SetCenterColor(0, 0, 0, 0.85)
+    backdrop:SetEdgeColor(0.25, 0.55, 1, 1)
+    backdrop:SetEdgeTexture(nil, 1, 1, 2)
+
+    local title = wm:CreateControl("$(parent)Title", window, CT_LABEL)
+    title:SetAnchor(TOPLEFT, window, TOPLEFT, 14, 10)
+    title:SetAnchor(TOPRIGHT, window, TOPRIGHT, -40, 10)
+    title:SetFont("ZoFontWinH2")
+    title:SetColor(0.75, 0.9, 1, 1)
+    title:SetText("DevTestBed Controls")
+
+    local closeButton = wm:CreateControl("$(parent)Close", window, CT_BUTTON)
+    closeButton:SetDimensions(24, 24)
+    closeButton:SetAnchor(TOPRIGHT, window, TOPRIGHT, -8, 6)
+    closeButton:SetFont("ZoFontGameBold")
+    closeButton:SetText("X")
+    closeButton:SetHandler("OnClicked", function()
+        window:SetHidden(true)
+    end)
+
+    local modeLabel = DevTestBed.CreateControlLabel(window, "$(parent)ModeLabel", "Game Mode", title, 16)
+    local modeDropdown = wm:CreateControlFromVirtual("$(parent)ModeDropdown", window, "ZO_ComboBox")
+    modeDropdown:SetDimensions(180, 28)
+    modeDropdown:SetAnchor(TOPLEFT, modeLabel, BOTTOMLEFT, 0, 4)
+
+    local countLabel = DevTestBed.CreateControlLabel(window, "$(parent)CountLabel", "Required Count", modeDropdown, 14)
+    local countDropdown = wm:CreateControlFromVirtual("$(parent)CountDropdown", window, "ZO_ComboBox")
+    countDropdown:SetDimensions(180, 28)
+    countDropdown:SetAnchor(TOPLEFT, countLabel, BOTTOMLEFT, 0, 4)
+
+    local timeLabel = DevTestBed.CreateControlLabel(window, "$(parent)TimeLabel", "Time Limit", countDropdown, 14)
+    local timeDropdown = wm:CreateControlFromVirtual("$(parent)TimeDropdown", window, "ZO_ComboBox")
+    timeDropdown:SetDimensions(180, 28)
+    timeDropdown:SetAnchor(TOPLEFT, timeLabel, BOTTOMLEFT, 0, 4)
+
+    local startButton = DevTestBed.CreateControlButton(window, "$(parent)StartButton", "Start Game", 135, 32)
+    startButton:SetAnchor(TOPLEFT, timeDropdown, BOTTOMLEFT, 0, 18)
+    startButton:SetHandler("OnClicked", function()
+        local mode = DevTestBed.GetControlPanelSelectedMode()
+        local count = DevTestBed.GetControlPanelSelectedCount()
+        local minutes = DevTestBed.GetControlPanelSelectedMinutes()
+        local maxCount, reason = DevTestBed.GetControlPanelCountInfo(mode)
+
+        if not count or not maxCount or maxCount < 1 then
+            DevTestBed.Print(reason or "No valid game count is available.")
+            DevTestBed.RefreshControlWindow()
+            return
+        end
+
+        if mode == "target" then
+            DevTestBed.StartTargetMode(count, minutes)
+        else
+            DevTestBed.StartThresholdMode(count, minutes)
+        end
+
+        DevTestBed.RefreshControlWindow()
+    end)
+
+    local resetButton = DevTestBed.CreateControlButton(window, "$(parent)ResetButton", "Reset Game", 135, 32)
+    resetButton:SetAnchor(LEFT, startButton, RIGHT, 16, 0)
+    resetButton:SetHandler("OnClicked", function()
+        DevTestBed.ResetGame()
+        DevTestBed.RefreshControlWindow()
+    end)
+
+    local statusButton = DevTestBed.CreateControlButton(window, "$(parent)StatusButton", "Toggle Status", 135, 32)
+    statusButton:SetAnchor(TOPLEFT, startButton, BOTTOMLEFT, 0, 12)
+    statusButton:SetHandler("OnClicked", function()
+        DevTestBed.ToggleGameStatusWindow()
+        DevTestBed.RefreshControlWindow()
+    end)
+
+    local refreshButton = DevTestBed.CreateControlButton(window, "$(parent)RefreshButton", "Refresh Counts", 135, 32)
+    refreshButton:SetAnchor(LEFT, statusButton, RIGHT, 16, 0)
+    refreshButton:SetHandler("OnClicked", function()
+        DevTestBed.PopulateControlCountDropdown()
+        DevTestBed.RefreshControlWindow()
+    end)
+
+    local currentTitle = DevTestBed.CreateControlLabel(window, "$(parent)CurrentTitle", "Current Game", statusButton, 18)
+
+    local currentInfo = wm:CreateControl("$(parent)CurrentInfo", window, CT_LABEL)
+    currentInfo:SetAnchor(TOPLEFT, currentTitle, BOTTOMLEFT, 0, 6)
+    currentInfo:SetAnchor(BOTTOMRIGHT, window, BOTTOMRIGHT, -14, -14)
+    currentInfo:SetFont("ZoFontGame")
+    currentInfo:SetColor(1, 1, 1, 1)
+    currentInfo:SetText("")
+
+    DevTestBed.ui.controlWindow = window
+    DevTestBed.ui.controlModeDropdown = modeDropdown
+    DevTestBed.ui.controlCountDropdown = countDropdown
+    DevTestBed.ui.controlTimeDropdown = timeDropdown
+    DevTestBed.ui.controlModeCombo = ZO_ComboBox_ObjectFromContainer(modeDropdown)
+    DevTestBed.ui.controlCountCombo = ZO_ComboBox_ObjectFromContainer(countDropdown)
+    DevTestBed.ui.controlTimeCombo = ZO_ComboBox_ObjectFromContainer(timeDropdown)
+    DevTestBed.ui.controlStartButton = startButton
+    DevTestBed.ui.controlResetButton = resetButton
+    DevTestBed.ui.controlStatusButton = statusButton
+    DevTestBed.ui.controlRefreshButton = refreshButton
+    DevTestBed.ui.controlCurrentInfo = currentInfo
+
+    DevTestBed.PopulateControlModeDropdown()
+    DevTestBed.PopulateControlTimeDropdown()
+    DevTestBed.PopulateControlCountDropdown()
+    DevTestBed.RefreshControlWindow()
+
+    return window
+end
+
+function DevTestBed.RefreshControlWindow()
+    if not DevTestBed.ui.controlWindow then
+        return
+    end
+
+    local mode = DevTestBed.GetControlPanelSelectedMode()
+    local maxCount, reason, teamCount = DevTestBed.GetControlPanelCountInfo(mode, true)
+    local canStart = teamCount > 0 and tonumber(maxCount or 0) >= 1
+
+    DevTestBed.SetControlButtonEnabled(DevTestBed.ui.controlStartButton, canStart)
+
+    if DevTestBed.ui.controlCurrentInfo then
+        local game = DevTestBed.game or {}
+        local modeText = DevTestBed.GetGameModeDisplayText()
+        local timerText = DevTestBed.GetGameTimerDisplayText()
+        local statusText = "Inactive"
+
+        if game.winner then
+            statusText = "Winner: " .. tostring(game.winner)
+        elseif game.active then
+            statusText = game.overtime and "Overtime" or "Active"
+        end
+
+        local countText = ""
+        if canStart then
+            local suffix = mode == "threshold" and "All Items" or "Max"
+            countText = zo_strformat("Teams: <<1>>\nAvailable Count: 1 - <<2>> (<<3>>)\n", tostring(teamCount), tostring(maxCount), suffix)
+        else
+            countText = zo_strformat("Teams: <<1>>\nAvailable Count: <<2>>\n", tostring(teamCount or 0), tostring(reason or "Unavailable"))
+        end
+
+        DevTestBed.ui.controlCurrentInfo:SetText(zo_strformat(
+            "<<1>>Selected: <<2>>\nMode: <<3>>\nTimer: <<4>>\nStatus: <<5>>",
+            countText,
+            DevTestBed.TitleCaseFirst(mode),
+            tostring(modeText),
+            timerText ~= "" and timerText or "None",
+            tostring(statusText)
+        ))
+    end
+end
+
+function DevTestBed.ShowControlWindow()
+    local window = DevTestBed.CreateControlWindow()
+    window:SetHidden(false)
+    DevTestBed.PopulateControlCountDropdown()
+    DevTestBed.RefreshControlWindow()
+end
+
+function DevTestBed.HideControlWindow()
+    if DevTestBed.ui.controlWindow then
+        DevTestBed.ui.controlWindow:SetHidden(true)
+    end
+end
+
+function DevTestBed.ToggleControlWindow()
+    local window = DevTestBed.CreateControlWindow()
+
+    if window:IsHidden() then
+        window:SetHidden(false)
+        DevTestBed.PopulateControlCountDropdown()
+        DevTestBed.RefreshControlWindow()
     else
         window:SetHidden(true)
     end
@@ -1183,6 +1663,7 @@ function DevTestBed.CheckThresholdGameState()
     if not DevTestBed.game.locked and DevTestBed.game.lastTimerRefreshSecond ~= currentTimerSecond then
         DevTestBed.game.lastTimerRefreshSecond = currentTimerSecond
         DevTestBed.RefreshGameStatusWindow()
+        DevTestBed.RefreshControlWindow()
     end
 
     local pulseLookup = DevTestBed.game.pulseFurnitureLookup or {}
@@ -1397,6 +1878,10 @@ function DevTestBed.StartThresholdMode(thresholdCount, timeLimitMinutes)
     if changedCount > 0 then
         DevTestBed.Dbg("Placed " .. tostring(changedCount) .. " item(s) into their non-winning state.")
     end
+
+    if DevTestBed.ui and DevTestBed.ui.controlWindow then
+        DevTestBed.RefreshControlWindow()
+    end
 end
 
 function DevTestBed.SeedRandomOnce()
@@ -1471,6 +1956,7 @@ function DevTestBed.CheckTargetGameState()
     if not DevTestBed.game.locked and DevTestBed.game.lastTimerRefreshSecond ~= currentTimerSecond then
         DevTestBed.game.lastTimerRefreshSecond = currentTimerSecond
         DevTestBed.RefreshGameStatusWindow()
+        DevTestBed.RefreshControlWindow()
     end
 
     local pulseLookup = DevTestBed.game.pulseFurnitureLookup or {}
@@ -1708,6 +2194,10 @@ function DevTestBed.StartTargetMode(targetCount, timeLimitMinutes)
     if targetChangedCount > 0 then
         DevTestBed.Dbg("Placed " .. tostring(targetChangedCount) .. " monitored target item(s) into their non-winning state.")
     end
+
+    if DevTestBed.ui and DevTestBed.ui.controlWindow then
+        DevTestBed.RefreshControlWindow()
+    end
 end
 
 
@@ -1883,6 +2373,11 @@ function DevTestBed.ResetGame()
         tostring(changedCount),
         tostring(scannedCount)
     ))
+
+    if DevTestBed.ui and DevTestBed.ui.controlWindow then
+        DevTestBed.PopulateControlCountDropdown()
+        DevTestBed.RefreshControlWindow()
+    end
 end
 
 
@@ -1972,6 +2467,11 @@ function DevTestBed.HandleSlashCommand(args)
 
     if cmd == "window" then
         DevTestBed.ToggleGameStatusWindow()
+        return
+    end
+
+    if cmd == "controls" or cmd == "control" then
+        DevTestBed.ToggleControlWindow()
         return
     end
 
